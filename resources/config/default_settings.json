@@ -1,0 +1,53 @@
+{
+  "recording": {
+    "fps": 1,
+    "chunk_duration_seconds": 15,
+    "retention_days": 3,
+    "video_quality": "medium",
+    "excluded_apps": []
+  },
+  "analysis": {
+    "provider": "gemini",
+    "analysis_interval_minutes": 15,
+    "context_window_minutes": 60,
+    "auto_categorize": true
+  },
+  "ui": {
+    "theme": "light",
+    "language": "en",
+    "show_notifications": true,
+    "minimize_to_tray": true
+  },
+  "categories": [
+    {
+      "name": "Work",
+      "color": "#4CAF50",
+      "icon": "💼"
+    },
+    {
+      "name": "Meeting",
+      "color": "#2196F3",
+      "icon": "👥"
+    },
+    {
+      "name": "Break",
+      "color": "#FF9800",
+      "icon": "☕"
+    },
+    {
+      "name": "Productivity",
+      "color": "#9C27B0",
+      "icon": "📝"
+    },
+    {
+      "name": "Learning",
+      "color": "#00BCD4",
+      "icon": "📚"
+    },
+    {
+      "name": "Entertainment",
+      "color": "#F44336",
+      "icon": "🎮"
+    }
+  ]
+}

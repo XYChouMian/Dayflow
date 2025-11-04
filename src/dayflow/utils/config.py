@@ -10,7 +10,7 @@ from dataclasses import dataclass, asdict
 class RecordingConfig:
     """Recording configuration."""
 
-    fps: int = 1
+    fps: float = 0.2  # 0.2 FPS = 1 frame per 5 seconds
     chunk_duration_seconds: int = 15
     retention_days: int = 3
     video_quality: str = "medium"  # low, medium, high
@@ -30,6 +30,8 @@ class AnalysisConfig:
     analysis_interval_minutes: int = 15
     context_window_minutes: int = 60
     auto_categorize: bool = True
+    auto_daily_summary: bool = True  # Enable automatic daily summary
+    daily_summary_time: str = "22:00"  # Time to generate daily summary (HH:MM)
 
 
 @dataclass

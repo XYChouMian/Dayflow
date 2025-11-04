@@ -144,11 +144,20 @@ class StorageManager:
         """
         Delete recordings older than retention period.
 
+        Deletes:
+        - Original recording video files (chunks)
+        - Timelapse video files
+        - RecordingChunk database records
+
+        Preserves:
+        - TimelineActivity records (text analysis results for historical statistics)
+
         Returns:
             Dict with cleanup statistics
         """
         cutoff_date = datetime.now() - timedelta(days=self.retention_days)
-        deleted_files = 0
+        deleted_chunk_files = 0
+        deleted_timelapse_files = 0
         deleted_records = 0
         freed_bytes = 0
 
@@ -156,7 +165,7 @@ class StorageManager:
 
         session = get_session_direct()
         try:
-            # Get old chunks
+            # 1. Clean up old recording chunks
             old_chunks = (
                 session.query(RecordingChunk)
                 .filter(RecordingChunk.start_time < cutoff_date)
@@ -165,13 +174,13 @@ class StorageManager:
 
             for chunk in old_chunks:
                 try:
-                    # Delete file
+                    # Delete chunk video file
                     file_path = Path(chunk.file_path)
                     if file_path.exists():
                         file_size = file_path.stat().st_size
                         file_path.unlink()
                         freed_bytes += file_size
-                        deleted_files += 1
+                        deleted_chunk_files += 1
 
                     # Delete database record
                     session.delete(chunk)
@@ -180,20 +189,46 @@ class StorageManager:
                 except Exception as e:
                     logger.error(f"Error deleting chunk {chunk.id}: {e}")
 
+            # 2. Clean up old timelapse files (but keep TimelineActivity records)
+            old_activities = (
+                session.query(TimelineActivity)
+                .filter(TimelineActivity.start_time < cutoff_date)
+                .filter(TimelineActivity.timelapse_path.isnot(None))
+                .all()
+            )
+
+            for activity in old_activities:
+                try:
+                    if activity.timelapse_path:
+                        timelapse_file = Path(activity.timelapse_path)
+                        if timelapse_file.exists():
+                            file_size = timelapse_file.stat().st_size
+                            timelapse_file.unlink()
+                            freed_bytes += file_size
+                            deleted_timelapse_files += 1
+
+                        # Clear the path reference but keep the activity record
+                        activity.timelapse_path = None
+
+                except Exception as e:
+                    logger.error(f"Error deleting timelapse for activity {activity.id}: {e}")
+
             session.commit()
 
             # Clean up empty directories
             self._cleanup_empty_dirs()
 
             stats = {
-                "deleted_files": deleted_files,
-                "deleted_records": deleted_records,
+                "deleted_chunk_files": deleted_chunk_files,
+                "deleted_timelapse_files": deleted_timelapse_files,
+                "deleted_chunk_records": deleted_records,
                 "freed_mb": freed_bytes / (1024 * 1024),
                 "cutoff_date": cutoff_date,
             }
 
             logger.info(
-                f"Cleanup complete: {deleted_files} files, "
+                f"Cleanup complete: {deleted_chunk_files} chunk files, "
+                f"{deleted_timelapse_files} timelapse files, "
                 f"{stats['freed_mb']:.1f} MB freed"
             )
 
@@ -207,9 +242,18 @@ class StorageManager:
             session.close()
 
     def _cleanup_empty_dirs(self) -> None:
-        """Remove empty date directories."""
+        """Remove empty date directories from both recordings and timelapses."""
         try:
+            # Clean recordings directories
             for date_dir in self.recordings_dir.iterdir():
+                if date_dir.is_dir():
+                    # Check if directory is empty or only has empty subdirs
+                    if not any(date_dir.rglob("*")):
+                        shutil.rmtree(date_dir)
+                        logger.debug(f"Removed empty directory: {date_dir}")
+
+            # Clean timelapse directories
+            for date_dir in self.timelapses_dir.iterdir():
                 if date_dir.is_dir():
                     # Check if directory is empty or only has empty subdirs
                     if not any(date_dir.rglob("*")):

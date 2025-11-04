@@ -1,4 +1,4 @@
-"""Screen recorder using mss and OpenCV for 1 FPS capture."""
+"""Screen recorder using mss and OpenCV for 0.2 FPS capture (1 frame per 5 seconds)."""
 
 import logging
 import time
@@ -16,14 +16,14 @@ logger = logging.getLogger(__name__)
 
 class ScreenRecorder:
     """
-    Screen recorder that captures at 1 FPS and creates 15-second video chunks.
+    Screen recorder that captures at 0.2 FPS (1 frame per 5 seconds) and creates 15-second video chunks.
     """
 
     def __init__(
         self,
         output_dir: Path,
         chunk_duration: int = 15,
-        fps: int = 1,
+        fps: float = 0.2,
         display_id: int = 1,
         on_chunk_complete: Optional[Callable[[Path, datetime, datetime], None]] = None,
     ):
@@ -33,7 +33,7 @@ class ScreenRecorder:
         Args:
             output_dir: Directory to save video chunks
             chunk_duration: Duration of each chunk in seconds (default: 15)
-            fps: Frames per second to capture (default: 1)
+            fps: Frames per second to capture (default: 0.2, i.e., 1 frame per 5 seconds)
             display_id: Monitor ID to record (1 for primary, 2+ for secondary)
             on_chunk_complete: Callback when chunk is saved (path, start_time, end_time)
         """

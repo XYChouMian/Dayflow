@@ -86,3 +86,12 @@ desktop.ini
 # Dayflow specific
 *.dayflow
 .dayflow_cache/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Temporary files and analysis results
+*分析结果*.txt
+*临时*.txt
+temp/
+tmp/

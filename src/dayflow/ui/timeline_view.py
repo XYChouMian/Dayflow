@@ -18,7 +18,6 @@ from dayflow.utils.config import Config
 from dayflow.models.database import get_session_direct
 from dayflow.models.timeline_activity import TimelineActivity
 from dayflow.ui.widgets.activity_card import ActivityCard
-from dayflow.ui.widgets.timeline_ruler import TimelineRuler
 
 logger = logging.getLogger(__name__)
 
@@ -50,22 +49,7 @@ class TimelineView(QWidget):
         header = self._create_header()
         main_layout.addWidget(header)
 
-        # Main content area: horizontal layout with ruler and activities
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(0)
-
-        # Left side: Timeline ruler with scroll area
-        self.ruler_scroll = QScrollArea()
-        self.ruler_scroll.setWidgetResizable(False)
-        self.ruler_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.ruler_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.ruler_scroll.setFixedWidth(80)
-
-        self.timeline_ruler = TimelineRuler()  # Will update range when loading activities
-        self.ruler_scroll.setWidget(self.timeline_ruler)
-        content_layout.addWidget(self.ruler_scroll)
-
-        # Right side: Activity cards scroll area
+        # Main content area: Activity cards scroll area
         self.activities_scroll = QScrollArea()
         self.activities_scroll.setWidgetResizable(True)
         self.activities_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -78,14 +62,7 @@ class TimelineView(QWidget):
         self.activities_layout.setSpacing(0)  # We'll manually control spacing with spacers
 
         self.activities_scroll.setWidget(self.activities_container)
-        content_layout.addWidget(self.activities_scroll)
-
-        # Synchronize scrolling between ruler and activities
-        self.activities_scroll.verticalScrollBar().valueChanged.connect(
-            self.ruler_scroll.verticalScrollBar().setValue
-        )
-
-        main_layout.addLayout(content_layout)
+        main_layout.addWidget(self.activities_scroll)
 
     def _create_header(self) -> QWidget:
         """Create header with date navigation."""
@@ -150,9 +127,7 @@ class TimelineView(QWidget):
                 )
 
                 if not activities:
-                    # Show empty state with default time range
-                    self.timeline_ruler.update_time_range(0, 23)
-
+                    # Show empty state
                     # Add spacer to center the empty message vertically
                     self.activities_layout.addStretch(1)
 
@@ -174,69 +149,24 @@ class TimelineView(QWidget):
                     start_hour = max(0, min_hour - 2)
                     end_hour = min(23, max_hour + 2)
 
-                    # Update timeline ruler with calculated range
-                    self.timeline_ruler.update_time_range(start_hour, end_hour)
-
-                    # Constants for positioning
-                    PIXELS_PER_HOUR = 80
-                    MIN_CARD_SPACING = 10  # Minimum spacing between cards
-
-                    # Track previous card's bottom position
-                    previous_bottom_position = 0
+                    # Constants for fixed spacing
+                    FIXED_CARD_SPACING = 15  # Fixed spacing between all cards
 
                     for i, activity in enumerate(activities):
                         # Create card
                         card = ActivityCard(activity, self.config)
 
-                        # Calculate Y position based on start time (relative to start_hour)
-                        activity_hour = activity.start_time.hour
-                        activity_minute = activity.start_time.minute
-                        relative_hour = activity_hour - start_hour
-                        y_position = int(relative_hour * PIXELS_PER_HOUR + (activity_minute / 60) * PIXELS_PER_HOUR)
+                        # Add spacing before card (except first card)
+                        if i > 0:
+                            self.activities_layout.addSpacing(FIXED_CARD_SPACING)
 
-                        # Calculate spacing before this card
-                        if i == 0:
-                            # First card: add spacer from top to card position
-                            if y_position > 0:
-                                self.activities_layout.addSpacing(y_position)
-                        else:
-                            # Subsequent cards: add spacer between previous card and this card
-                            gap = y_position - previous_bottom_position
-                            if gap > 0:
-                                self.activities_layout.addSpacing(gap)
-                            # If gap < 0, cards overlap - we'll handle this by limiting previous card height
-
-                        # Get card's natural height
-                        card_height = card.card_height
-
-                        # Check for overlap with next activity and adjust card height if needed
-                        if i < len(activities) - 1:
-                            next_activity = activities[i + 1]
-                            next_activity_hour = next_activity.start_time.hour
-                            next_activity_minute = next_activity.start_time.minute
-                            next_relative_hour = next_activity_hour - start_hour
-                            next_y_position = int(next_relative_hour * PIXELS_PER_HOUR + (next_activity_minute / 60) * PIXELS_PER_HOUR)
-
-                            # Calculate available space
-                            available_space = next_y_position - y_position - MIN_CARD_SPACING
-
-                            # Limit card height to available space
-                            if available_space > 0 and card_height > available_space:
-                                card.setMaximumHeight(available_space)
-                                card.setMinimumHeight(min(60, available_space))
-                                card_height = available_space
-
-                        # Add card to layout (no need for setParent, move, or show)
+                        # Add card to layout
                         self.activities_layout.addWidget(card)
                         self.activity_cards.append(card)
 
-                        # Update previous bottom position
-                        previous_bottom_position = y_position + card_height
-
                         logger.debug(
                             f"Card {i}: {activity.start_time.strftime('%H:%M')} - "
-                            f"y_position={y_position}px, card_height={card_height}px, "
-                            f"bottom={previous_bottom_position}px"
+                            f"Fixed height with {FIXED_CARD_SPACING}px spacing"
                         )
 
                     # Add stretch at the end to fill remaining space

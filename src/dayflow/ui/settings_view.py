@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QMessageBox,
     QScrollArea,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt
 
@@ -126,14 +127,23 @@ class SettingsView(QWidget):
         self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
         form.addRow("AI 提供商:", self.provider_combo)
 
-        # Model selection
+        # Model selection (for video analysis)
         self.model_combo = QComboBox()
         self.model_combo.addItems([
             "gemini-2.5-flash",
             "gemini-2.5-pro",
             "gemini-2.0-flash-lite",
         ])
-        form.addRow("模型:", self.model_combo)
+        form.addRow("视频分析模型:", self.model_combo)
+
+        # Daily summary model selection
+        self.daily_summary_model_combo = QComboBox()
+        self.daily_summary_model_combo.addItems([
+            "gemini-2.0-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ])
+        form.addRow("每日总结模型:", self.daily_summary_model_combo)
 
         # API Key
         self.api_key_input = QLineEdit()
@@ -151,6 +161,16 @@ class SettingsView(QWidget):
         self.interval_spin.setRange(5, 60)
         self.interval_spin.setSuffix(" 分钟")
         form.addRow("分析间隔:", self.interval_spin)
+
+        # Auto daily summary
+        self.auto_summary_check = QCheckBox("启用自动每日总结")
+        form.addRow("", self.auto_summary_check)
+
+        # Daily summary time
+        self.summary_time_input = QLineEdit()
+        self.summary_time_input.setPlaceholderText("22:00")
+        self.summary_time_input.setMaxLength(5)
+        form.addRow("每日总结时间:", self.summary_time_input)
 
         return group
 
@@ -222,13 +242,26 @@ class SettingsView(QWidget):
                 provider_map.get(self.config.analysis.provider.lower(), 0)
             )
 
-            # Load model name
+            # Load model name (for video analysis)
             model_name = getattr(self.config.analysis, "model_name", "gemini-2.5-flash")
             index = self.model_combo.findText(model_name)
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
 
+            # Load daily summary model name
+            daily_summary_model = getattr(self.config.analysis, "daily_summary_model_name", "gemini-2.0-flash-lite")
+            index = self.daily_summary_model_combo.findText(daily_summary_model)
+            if index >= 0:
+                self.daily_summary_model_combo.setCurrentIndex(index)
+
             self.interval_spin.setValue(self.config.analysis.analysis_interval_minutes)
+
+            # Daily summary settings
+            auto_summary = getattr(self.config.analysis, "auto_daily_summary", True)
+            self.auto_summary_check.setChecked(auto_summary)
+
+            summary_time = getattr(self.config.analysis, "daily_summary_time", "22:00")
+            self.summary_time_input.setText(summary_time)
 
             # Recording settings
             quality_map = {"low": 0, "medium": 1, "high": 2}
@@ -258,9 +291,14 @@ class SettingsView(QWidget):
             provider = self.provider_combo.currentText().lower()
             self.config.set("analysis.provider", provider)
             self.config.set("analysis.model_name", self.model_combo.currentText())
+            self.config.set("analysis.daily_summary_model_name", self.daily_summary_model_combo.currentText())
             self.config.set(
                 "analysis.analysis_interval_minutes", self.interval_spin.value()
             )
+
+            # Save daily summary settings
+            self.config.set("analysis.auto_daily_summary", self.auto_summary_check.isChecked())
+            self.config.set("analysis.daily_summary_time", self.summary_time_input.text())
 
             # Save API key if provided
             api_key = self.api_key_input.text().strip()
@@ -285,6 +323,7 @@ class SettingsView(QWidget):
     def _on_provider_changed(self, provider: str) -> None:
         """Update model list when provider changes."""
         self.model_combo.clear()
+        self.daily_summary_model_combo.clear()
 
         if provider.lower() == "gemini":
             self.model_combo.addItems([
@@ -292,10 +331,20 @@ class SettingsView(QWidget):
                 "gemini-2.5-pro",
                 "gemini-2.0-flash-lite",
             ])
+            self.daily_summary_model_combo.addItems([
+                "gemini-2.0-flash-lite",
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+            ])
         elif provider.lower() == "openai":
             self.model_combo.addItems([
                 "gpt-4o",
                 "gpt-4o-mini",
+                "gpt-4-turbo",
+            ])
+            self.daily_summary_model_combo.addItems([
+                "gpt-4o-mini",
+                "gpt-4o",
                 "gpt-4-turbo",
             ])
         elif provider.lower() == "ollama":
@@ -303,4 +352,9 @@ class SettingsView(QWidget):
                 "llama3.2-vision",
                 "llava",
                 "bakllava",
+            ])
+            self.daily_summary_model_combo.addItems([
+                "llama3.2",
+                "llama3.2-vision",
+                "llava",
             ])

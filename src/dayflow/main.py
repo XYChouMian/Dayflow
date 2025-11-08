@@ -19,6 +19,7 @@ from dayflow.core.power_manager import PowerManager
 from dayflow.core.video_processor import VideoProcessor
 from dayflow.analysis.gemini_service import GeminiService
 from dayflow.analysis.analysis_manager import AnalysisManager
+from dayflow.services.daily_summary_manager import DailySummaryManager
 from dayflow.models.database import init_db
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class DayflowApp:
         self.config = config
         self.recorder = None
         self.analysis_manager = None
+        self.daily_summary_manager = None
         self.power_manager = None
         self.storage_manager = None
 
@@ -81,6 +83,10 @@ class DayflowApp:
                     "Please configure in Settings."
                 )
 
+            # Initialize daily summary manager
+            self.daily_summary_manager = DailySummaryManager(self.config)
+            logger.info("Daily summary manager initialized")
+
             # Initialize screen recorder
             chunks_dir = self.storage_manager.get_chunks_dir(datetime.now())
             self.recorder = ScreenRecorder(
@@ -122,6 +128,11 @@ class DayflowApp:
                 self.analysis_manager.start(run_immediately=False)
                 logger.info("Analysis manager started")
 
+            # Start daily summary scheduler
+            if self.daily_summary_manager:
+                self.daily_summary_manager.start()
+                logger.info("Daily summary manager started")
+
             # Schedule cleanup
             QTimer.singleShot(60000, self._periodic_cleanup)  # Run every minute
 
@@ -138,6 +149,9 @@ class DayflowApp:
 
             if self.analysis_manager:
                 self.analysis_manager.stop()
+
+            if self.daily_summary_manager:
+                self.daily_summary_manager.stop()
 
             if self.power_manager:
                 self.power_manager.stop()

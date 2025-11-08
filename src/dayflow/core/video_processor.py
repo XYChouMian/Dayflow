@@ -23,6 +23,49 @@ class VideoProcessor:
         """Initialize video processor."""
         self._check_ffmpeg()
 
+    @staticmethod
+    def _parse_frame_rate(rate_str: str) -> float:
+        """
+        Safely parse frame rate string from video metadata.
+
+        FFmpeg returns frame rates in formats like "30/1" (30 fps) or "24000/1001" (23.976 fps).
+        This function safely converts these strings to float without using eval().
+
+        Args:
+            rate_str: Frame rate string (e.g., "30/1", "24000/1001")
+
+        Returns:
+            Float frame rate value, or 0.0 if parsing fails
+
+        Security Note:
+            This replaces the dangerous eval() call which could execute arbitrary code
+            if a malicious video file contained code injection in metadata.
+        """
+        if not rate_str:
+            return 0.0
+
+        try:
+            # Handle fraction format "numerator/denominator"
+            if '/' in rate_str:
+                parts = rate_str.split('/', 1)  # Split only on first '/'
+                if len(parts) == 2:
+                    numerator = float(parts[0].strip())
+                    denominator = float(parts[1].strip())
+
+                    # Prevent division by zero
+                    if denominator == 0:
+                        logger.warning(f"Invalid frame rate denominator: {rate_str}")
+                        return 0.0
+
+                    return numerator / denominator
+
+            # Handle simple float/int format
+            return float(rate_str)
+
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse frame rate '{rate_str}': {e}")
+            return 0.0
+
     def _check_ffmpeg(self) -> bool:
         """Check if ffmpeg is available."""
         try:
@@ -244,7 +287,7 @@ class VideoProcessor:
                     "width": int(video_info.get("width", 0)),
                     "height": int(video_info.get("height", 0)),
                     "duration": float(probe["format"].get("duration", 0)),
-                    "fps": eval(video_info.get("r_frame_rate", "0/1")),
+                    "fps": self._parse_frame_rate(video_info.get("r_frame_rate", "0/1")),
                     "codec": video_info.get("codec_name", "unknown"),
                     "size_mb": float(probe["format"].get("size", 0)) / (1024 * 1024),
                 }

@@ -41,10 +41,10 @@ class TimelineCategory(Base):
     def get_default_categories() -> list[dict]:
         """Get list of default categories."""
         return [
-            {"name": "Work", "color": "#4CAF50", "icon": "💼"},
-            {"name": "Meeting", "color": "#2196F3", "icon": "👥"},
-            {"name": "Break", "color": "#FF9800", "icon": "☕"},
-            {"name": "Productivity", "color": "#9C27B0", "icon": "📝"},
-            {"name": "Learning", "color": "#00BCD4", "icon": "📚"},
-            {"name": "Entertainment", "color": "#F44336", "icon": "🎮"},
+            {"name": "工作", "color": "#4CAF50", "icon": "💼"},
+            {"name": "会议", "color": "#2196F3", "icon": "👥"},
+            {"name": "休息", "color": "#FF9800", "icon": "☕"},
+            {"name": "效率", "color": "#9C27B0", "icon": "📝"},
+            {"name": "学习", "color": "#00BCD4", "icon": "📚"},
+            {"name": "娱乐", "color": "#F44336", "icon": "🎮"},
         ]

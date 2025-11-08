@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
         self.dashboard_btn.clicked.connect(self.show_dashboard)
         layout.addWidget(self.dashboard_btn)
 
-        self.journal_btn = QPushButton("📝 日志")
+        self.journal_btn = QPushButton("📝 每日总结")
         self.journal_btn.setCheckable(True)
         self.journal_btn.clicked.connect(self.show_journal)
         layout.addWidget(self.journal_btn)

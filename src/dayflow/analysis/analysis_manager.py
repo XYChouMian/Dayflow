@@ -286,7 +286,7 @@ class AnalysisManager:
         Get or create category ID.
 
         Args:
-            category_name: Category name
+            category_name: Category name (Chinese or English)
 
         Returns:
             Category ID or None
@@ -294,10 +294,28 @@ class AnalysisManager:
         if not category_name:
             return None
 
+        # Category name mapping: Chinese <-> English
+        category_mapping = {
+            # Chinese to English
+            "工作": "Work",
+            "会议": "Meeting",
+            "休息": "Break",
+            "效率": "Productivity",
+            "学习": "Learning",
+            "娱乐": "Entertainment",
+            # English to Chinese
+            "Work": "工作",
+            "Meeting": "会议",
+            "Break": "休息",
+            "Productivity": "效率",
+            "Learning": "学习",
+            "Entertainment": "娱乐",
+        }
+
         try:
             session = get_session_direct()
             try:
-                # Try to find existing category
+                # Try to find existing category with original name
                 category = (
                     session.query(TimelineCategory)
                     .filter(TimelineCategory.name == category_name)
@@ -312,14 +330,28 @@ class AnalysisManager:
                 if count == 0:
                     self._create_default_categories(session)
 
-                # Try again
+                # Try again with original name
                 category = (
                     session.query(TimelineCategory)
                     .filter(TimelineCategory.name == category_name)
                     .first()
                 )
 
-                return category.id if category else None
+                if category:
+                    return category.id
+
+                # Try with translated name (fallback for legacy data)
+                translated_name = category_mapping.get(category_name)
+                if translated_name:
+                    category = (
+                        session.query(TimelineCategory)
+                        .filter(TimelineCategory.name == translated_name)
+                        .first()
+                    )
+                    if category:
+                        return category.id
+
+                return None
 
             finally:
                 session.close()

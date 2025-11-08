@@ -200,45 +200,21 @@ class ActivityCard(QFrame):
 
     def _calculate_card_height(self) -> int:
         """
-        Calculate dynamic card height based on activity duration.
-
-        Height ranges:
-        - Minimum: 60px (< 5 minutes)
-        - Maximum: 300px (> 120 minutes)
-        - Linear interpolation in between
+        Calculate card height - fixed size for all activities.
 
         Returns:
-            Card height in pixels
+            Card height in pixels (fixed at 150px)
         """
-        duration = self.activity.duration_minutes
-
-        MIN_HEIGHT = 60
-        MAX_HEIGHT = 300
-        MIN_DURATION = 5  # minutes
-        MAX_DURATION = 120  # minutes
-
-        if duration <= MIN_DURATION:
-            return MIN_HEIGHT
-        elif duration >= MAX_DURATION:
-            return MAX_HEIGHT
-        else:
-            # Linear interpolation
-            ratio = (duration - MIN_DURATION) / (MAX_DURATION - MIN_DURATION)
-            height = MIN_HEIGHT + ratio * (MAX_HEIGHT - MIN_HEIGHT)
-            return int(height)
+        # Fixed height for all activity cards to ensure content is always visible
+        FIXED_HEIGHT = 150
+        return FIXED_HEIGHT
 
     def _determine_display_mode(self) -> str:
         """
-        Determine display mode based on card height.
-
-        Modes:
-        - "compact": 60-120px - Only time and title
-        - "standard": 120-300px - Time, title, and summary
+        Determine display mode - always use standard mode for full content display.
 
         Returns:
-            Display mode string
+            Display mode string (always "standard")
         """
-        if self.card_height < 120:
-            return "compact"
-        else:
-            return "standard"
+        # Always use standard mode to show full content (time, title, and summary)
+        return "standard"

@@ -4,7 +4,7 @@
 
 **AI-Powered Time Tracking - Automatically Record, Intelligently Analyze, Visualize Your Day**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)](https://www.microsoft.com/windows)
 
@@ -360,7 +360,15 @@ Contributions are welcome! Please follow these steps:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+
+**In simple terms:**
+- ✅ **Free to Use** - For personal learning, research, and non-commercial purposes
+- ✅ **Modify and Share** - Improve and share your modified versions
+- ❌ **No Commercial Use** - Cannot be used for commercial purposes or sold
+- 🔒 **ShareAlike** - Modified works must use the same license
+
+See the [LICENSE](LICENSE) file for full license terms.
 
 ---
 

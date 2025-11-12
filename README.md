@@ -4,7 +4,7 @@
 
 **AI 驱动的时间追踪应用 - 自动记录、智能分析、可视化你的每一天**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)](https://www.microsoft.com/windows)
 
@@ -360,7 +360,15 @@ poetry run python scripts/build.py
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+本项目采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 许可协议进行许可。
+
+**简单来说：**
+- ✅ **可以免费使用** - 个人学习、研究、非商业用途
+- ✅ **可以修改和分发** - 改进和分享你的修改版本
+- ❌ **禁止商业使用** - 不得将本软件用于商业目的或销售
+- 🔒 **相同方式共享** - 修改后的作品必须使用相同许可协议
+
+查看 [LICENSE](LICENSE) 文件了解完整许可条款。
 
 ---
 

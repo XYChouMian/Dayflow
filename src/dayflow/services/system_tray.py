@@ -31,8 +31,16 @@ class SystemTrayIcon(QSystemTrayIcon):
 
     def setup_icon(self) -> None:
         """Set up tray icon."""
-        # For now, use default icon
-        # TODO: Add custom icon
+        from PyQt6.QtWidgets import QStyle, QApplication
+
+        # Use standard icon from Qt
+        app = QApplication.instance()
+        if app:
+            style = app.style()
+            if style:
+                icon = style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+                self.setIcon(icon)
+
         self.setToolTip("Dayflow - 自动时间轴")
 
     def setup_menu(self) -> None:

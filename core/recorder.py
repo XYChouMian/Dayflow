@@ -9,10 +9,8 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Callable, List, Dict
-from queue import Queue, Empty
 
 import dxcam
-import numpy as np
 import cv2
 
 import config
@@ -78,12 +76,8 @@ class ScreenRecorder:
         
         logger.info("开始屏幕录制...")
         
-        # 初始化 dxcam
-        try:
-            self._camera = dxcam.create(output_idx=0, output_color="BGR")
-        except Exception as e:
-            logger.error(f"初始化 dxcam 失败: {e}")
-            raise
+        # 初始化 dxcam（带降级重试，避免部分机器/显示器组合直接灾难性失败）
+        self._camera = self._create_camera_with_fallback()
         
         self._recording = True
         self._paused = False
@@ -139,22 +133,57 @@ class ScreenRecorder:
             self._paused = False
             logger.info("录制已恢复")
     
+    def _create_camera_with_fallback(self) -> dxcam.DXCamera:
+        """创建 dxcam 相机，失败时尝试多种降级参数。"""
+        attempts = [
+            {"output_idx": 0, "output_color": "BGR"},
+            {"output_idx": 0},
+            {"device_idx": 0, "output_idx": 0, "output_color": "BGR"},
+            {"device_idx": 0, "output_idx": 0},
+            {},
+        ]
+        last_error = None
+
+        for idx, kwargs in enumerate(attempts, start=1):
+            try:
+                logger.info(f"尝试初始化 dxcam ({idx}/{len(attempts)}): {kwargs}")
+                camera = dxcam.create(**kwargs)
+                # 部分环境 create 成功但首次 grab 才会炸，这里预抓一帧尽早暴露问题
+                test_frame = camera.grab()
+                if test_frame is None:
+                    logger.warning("dxcam 初始化成功，但首次抓帧为空；继续使用并在录制循环中重试")
+                logger.info("dxcam 初始化成功")
+                return camera
+            except Exception as e:
+                last_error = e
+                logger.warning(f"dxcam 初始化尝试失败 ({kwargs}): {e}")
+                time.sleep(0.3)
+
+        error_message = (
+            "初始化屏幕录制失败。可能原因：显卡/显示器驱动异常、远程桌面环境、"
+            "dxcam 与当前输出设备不兼容。建议重启应用、更新显卡驱动，或切换显示器后重试。"
+        )
+        logger.error(f"{error_message} 最后错误: {last_error}")
+        raise RuntimeError(error_message) from last_error
+
     def _recording_loop(self):
         """录制主循环"""
         frame_interval = 1.0 / self.fps
         last_frame_time = 0
+        last_window_info = None  # 缓存上次窗口信息
         
         while not self._stop_event.is_set():
             current_time = time.time()
             
-            # 控制帧率
-            if current_time - last_frame_time < frame_interval:
-                time.sleep(0.1)  # 短暂休眠以降低 CPU 占用
+            # 控制帧率 - 使用精确等待而非轮询
+            time_to_wait = frame_interval - (current_time - last_frame_time)
+            if time_to_wait > 0:
+                self._stop_event.wait(min(time_to_wait, 0.5))  # 最多等待0.5秒，确保能响应停止信号
                 continue
             
             # 暂停检查
             if self._paused:
-                time.sleep(0.5)
+                self._stop_event.wait(0.5)
                 continue
             
             try:
@@ -172,16 +201,26 @@ class ScreenRecorder:
                 if self._should_create_new_chunk():
                     self._finalize_current_chunk()
                     self._create_new_chunk(frame.shape)
+                    last_window_info = None  # 重置窗口缓存
                 
-                # 记录窗口信息（使用帧捕获时的时间计算 elapsed）
+                # 记录窗口信息（仅在窗口变化时记录，减少数据量）
                 if self._current_chunk_start and window_info:
-                    elapsed = (frame_capture_time - self._current_chunk_start).total_seconds()
-                    self._current_window_records.append({
-                        "timestamp": elapsed,
-                        "app_name": self._window_tracker.get_friendly_app_name(window_info),
-                        "window_title": window_info.window_title,
-                        "process_name": window_info.app_name
-                    })
+                    # 检查窗口是否变化
+                    window_changed = (
+                        last_window_info is None or
+                        last_window_info.app_name != window_info.app_name or
+                        last_window_info.window_title != window_info.window_title
+                    )
+                    
+                    if window_changed:
+                        elapsed = (frame_capture_time - self._current_chunk_start).total_seconds()
+                        self._current_window_records.append({
+                            "timestamp": elapsed,
+                            "app_name": self._window_tracker.get_friendly_app_name(window_info),
+                            "window_title": window_info.window_title,
+                            "process_name": window_info.app_name
+                        })
+                        last_window_info = window_info
                 
                 # 写入帧
                 if self._current_writer:

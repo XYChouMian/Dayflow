@@ -164,6 +164,28 @@ class DayflowBackendProvider:
         cap.release()
         return frames_base64
     
+    def _extract_message_content(self, message_content) -> str:
+        """兼容不同 OpenAI/Gemini 兼容服务的 message.content 返回格式。"""
+        if isinstance(message_content, str):
+            return message_content
+
+        if isinstance(message_content, list):
+            parts = []
+            for item in message_content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    # 常见兼容格式：{"type":"text","text":"..."}
+                    text = item.get("text")
+                    if text:
+                        parts.append(text)
+            return "\n".join(parts).strip()
+
+        if message_content is None:
+            return ""
+
+        return str(message_content)
+
     async def _chat_completion(
         self,
         messages: List[dict],
@@ -196,7 +218,21 @@ class DayflowBackendProvider:
             response.raise_for_status()
             
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            choices = result.get("choices") or []
+            if not choices:
+                raise ValueError(f"响应中缺少 choices: {result}")
+
+            message = choices[0].get("message") or {}
+            content = self._extract_message_content(message.get("content"))
+            if content:
+                return content
+
+            # 兼容部分服务把文本放在顶层 text / output_text
+            fallback_text = choices[0].get("text") or result.get("output_text") or ""
+            if fallback_text:
+                return fallback_text
+
+            raise ValueError(f"无法从响应中提取文本内容: {result}")
             
         except httpx.HTTPStatusError as e:
             logger.error(f"API 请求失败: {e.response.status_code} - {e.response.text}")
@@ -234,10 +270,10 @@ class DayflowBackendProvider:
             logger.warning(f"无法从视频提取帧: {video_path}")
             return []
         
-        # 构建窗口信息文本（包含窗口标题）
+        # 构建窗口信息文本（包含窗口标题/文件名/页面标题）
         window_info_text = ""
         if window_records:
-            window_info_text = "\n\n窗口信息：\n"
+            window_info_text = "\n\n窗口信息（窗口标题里可能包含文件名、网页标题、聊天对象、文档名）：\n"
             # 按时间段聚合相同的应用
             current_app = None
             current_title = None

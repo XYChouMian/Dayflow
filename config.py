@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 # 版本信息
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 GITHUB_REPO = "SeiShonagon520/Dayflow"
 
 # API 配置 (OpenAI 兼容格式)
@@ -22,9 +22,18 @@ VIDEO_CODEC = "libx264"
 # 分析配置
 BATCH_DURATION_MINUTES = 15  # 批次时长约15分钟
 ANALYSIS_INTERVAL_SECONDS = 60  # 每分钟扫描一次
+ANALYSIS_MAX_IDLE_INTERVAL = 300  # 无任务时最大扫描间隔（秒）
+
+# 录制优化配置
+WINDOW_TRACKING_ON_CHANGE_ONLY = True  # 仅在窗口变化时记录（减少数据量）
+FRAME_CAPTURE_TIMEOUT = 2.0  # 帧捕获超时（秒）
 
 # 存储清理配置
 AUTO_DELETE_ANALYZED_CHUNKS = True  # 分析完成后自动删除视频切片（节省磁盘空间）
+
+# 性能监控配置（开发/调试用）
+ENABLE_PERFORMANCE_MONITOR = False  # 是否启用性能监控
+PERFORMANCE_MONITOR_INTERVAL = 5.0  # 监控间隔（秒）
 
 # 数据目录 - 使用更可靠的方式获取 AppData 路径
 def _get_app_data_dir() -> Path:

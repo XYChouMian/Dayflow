@@ -75,7 +75,7 @@
 
 ### 📋 Changelog
 
-#### v1.5.1 (2025-12)
+#### v1.5.2 (2026-03)
 
 **📊 Statistics Page Redesign**
 - Brand new dashboard style with refined aesthetics

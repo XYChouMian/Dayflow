@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QStackedWidget, QFrame,
     QLineEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QApplication, QSizePolicy, QSpacerItem, QFileDialog,
-    QScrollArea, QProgressBar
+    QScrollArea, QProgressBar, QComboBox
 )
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
@@ -619,6 +619,26 @@ class SettingsPanel(QWidget):
         record_desc.setObjectName("cardDesc")
         self._descs.append(record_desc)
         record_layout.addWidget(record_desc)
+
+        monitor_row = QHBoxLayout()
+        monitor_label = QLabel("录制显示器")
+        monitor_label.setObjectName("cardDesc")
+        self._descs.append(monitor_label)
+        monitor_row.addWidget(monitor_label)
+        monitor_row.addStretch()
+
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setMinimumHeight(34)
+        self.monitor_combo.setMinimumWidth(150)
+        self._populate_monitor_options()
+        monitor_row.addWidget(self.monitor_combo)
+        record_layout.addLayout(monitor_row)
+
+        self.monitor_save_btn = QPushButton("保存录制设置")
+        self.monitor_save_btn.setCursor(Qt.PointingHandCursor)
+        self.monitor_save_btn.setFixedHeight(36)
+        self.monitor_save_btn.clicked.connect(self._save_recording_settings)
+        record_layout.addWidget(self.monitor_save_btn)
         
         settings_row.addWidget(record_frame)
         layout.addLayout(settings_row)
@@ -1027,6 +1047,28 @@ class SettingsPanel(QWidget):
                 background-color: {t.bg_hover};
             }}
         """)
+
+        combo_style = f"""
+            QComboBox {{
+                background-color: {t.bg_tertiary};
+                color: {t.text_primary};
+                border: 1px solid {t.border};
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-size: 13px;
+            }}
+            QComboBox:focus {{
+                border-color: {t.accent};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {t.bg_secondary};
+                color: {t.text_primary};
+                border: 1px solid {t.border};
+                selection-background-color: {t.accent};
+            }}
+        """
+        if hasattr(self, 'monitor_combo'):
+            self.monitor_combo.setStyleSheet(combo_style)
         
         # 数据管理按钮
         data_btn_style = f"""
@@ -1046,6 +1088,8 @@ class SettingsPanel(QWidget):
         self.export_btn.setStyleSheet(data_btn_style)
         self.import_btn.setStyleSheet(data_btn_style)
         self.dashboard_btn.setStyleSheet(data_btn_style)
+        if hasattr(self, 'monitor_save_btn'):
+            self.monitor_save_btn.setStyleSheet(data_btn_style)
         
         # 邮件输入框样式
         email_input_style = f"""
@@ -1141,6 +1185,27 @@ class SettingsPanel(QWidget):
             }}
         """)
     
+    def _populate_monitor_options(self):
+        """填充显示器选项。"""
+        self.monitor_combo.clear()
+        screens = QApplication.screens()
+        if not screens:
+            self.monitor_combo.addItem("显示器 1", 0)
+            return
+
+        for idx, screen in enumerate(screens):
+            geom = screen.geometry()
+            label = f"显示器 {idx + 1} ({geom.width()}x{geom.height()})"
+            self.monitor_combo.addItem(label, idx)
+
+    def _save_recording_settings(self):
+        """保存录制相关配置。"""
+        output_idx = self.monitor_combo.currentData()
+        if output_idx is None:
+            output_idx = 0
+        self.storage.set_setting("record_output_idx", str(output_idx))
+        QMessageBox.information(self, "成功", "录制显示器设置已保存，下次开始录制时生效")
+
     def _load_settings(self):
         # 加载 API 设置
         api_url = self.storage.get_setting("api_url", config.API_BASE_URL)
@@ -1154,6 +1219,16 @@ class SettingsPanel(QWidget):
         # 加载主题设置
         theme = self.storage.get_setting("theme", "dark")
         self._update_theme_button(theme == "dark")
+
+        # 加载录制显示器设置
+        saved_output_idx = self.storage.get_setting("record_output_idx", "0")
+        try:
+            saved_output_idx = int(saved_output_idx)
+        except ValueError:
+            saved_output_idx = 0
+        combo_index = self.monitor_combo.findData(saved_output_idx)
+        if combo_index >= 0:
+            self.monitor_combo.setCurrentIndex(combo_index)
         
         # 加载邮件设置
         self.email_sender_input.setText(self.storage.get_setting("email_sender", ""))

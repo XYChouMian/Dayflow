@@ -33,12 +33,14 @@ class ScreenRecorder:
         fps: int = None,
         chunk_duration: int = None,
         output_dir: Path = None,
-        on_chunk_saved: Optional[Callable[[VideoChunk], None]] = None
+        on_chunk_saved: Optional[Callable[[VideoChunk], None]] = None,
+        output_idx: int = 0,
     ):
         self.fps = fps or config.RECORD_FPS
         self.chunk_duration = chunk_duration or config.CHUNK_DURATION_SECONDS
         self.output_dir = output_dir or config.CHUNKS_DIR
         self.on_chunk_saved = on_chunk_saved
+        self.output_idx = max(0, int(output_idx or 0))
         
         # 状态
         self._recording = False
@@ -74,7 +76,7 @@ class ScreenRecorder:
             logger.warning("录制已在进行中")
             return
         
-        logger.info("开始屏幕录制...")
+        logger.info(f"开始屏幕录制... (显示器 output_idx={self.output_idx})")
         
         # 初始化 dxcam（带降级重试，避免部分机器/显示器组合直接灾难性失败）
         self._camera = self._create_camera_with_fallback()
@@ -136,10 +138,10 @@ class ScreenRecorder:
     def _create_camera_with_fallback(self) -> dxcam.DXCamera:
         """创建 dxcam 相机，失败时尝试多种降级参数。"""
         attempts = [
-            {"output_idx": 0, "output_color": "BGR"},
-            {"output_idx": 0},
-            {"device_idx": 0, "output_idx": 0, "output_color": "BGR"},
-            {"device_idx": 0, "output_idx": 0},
+            {"output_idx": self.output_idx, "output_color": "BGR"},
+            {"output_idx": self.output_idx},
+            {"device_idx": 0, "output_idx": self.output_idx, "output_color": "BGR"},
+            {"device_idx": 0, "output_idx": self.output_idx},
             {},
         ]
         last_error = None
@@ -321,7 +323,11 @@ class RecordingManager:
     def __init__(self, storage_manager=None):
         from database.storage import StorageManager
         self.storage = storage_manager or StorageManager()
-        self.recorder = ScreenRecorder(on_chunk_saved=self._on_chunk_saved)
+        try:
+            output_idx = int(self.storage.get_setting("record_output_idx", "0"))
+        except Exception:
+            output_idx = 0
+        self.recorder = ScreenRecorder(on_chunk_saved=self._on_chunk_saved, output_idx=output_idx)
     
     def _on_chunk_saved(self, chunk: VideoChunk):
         """切片保存回调 - 写入数据库"""

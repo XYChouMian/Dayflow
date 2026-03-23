@@ -161,6 +161,20 @@ Dayflow is designed around **local recording + cloud analysis + local storage**.
 
 ---
 
+## ✅ README checklist covered in this revision
+
+- [x] Removed garbled text, typos, and broken directory names
+- [x] Reframed the opening so the project value is clearer
+- [x] Moved privacy information near the top
+- [x] Reduced feature overload and tightened the structure
+- [x] Added a roadmap section
+- [x] Added known limitations
+- [x] Clarified the current license choice
+- [x] Aligned the English README with the Chinese version
+- [x] Added a minimal Windows CI workflow
+
+---
+
 ## 🚀 Quick start
 
 ### Requirements
@@ -190,6 +204,16 @@ python build.py
 ```
 
 Or simply double-click `build.bat`.
+
+### Download prebuilt releases
+
+If you just want to use Dayflow without setting up Python locally:
+
+1. Open [Releases](https://github.com/SeiShonagon520/Dayflow/releases)
+2. Download the latest installer or archive
+3. Extract it and run `Dayflow.exe`
+
+> 💡 For the first run, configure the API first and then start recording.
 
 ---
 
@@ -321,6 +345,40 @@ Dayflow/
 - Full-screen games, special rendering windows, and remote desktop scenarios may behave differently
 - Multi-monitor support still has room for improvement
 - Analysis latency depends on your network and model provider stability
+
+---
+
+## 🧰 Troubleshooting
+
+### 1. No analysis results appear
+
+Check the following first:
+- API URL, key, and model name are correct
+- The configured model supports vision input
+- Your network can reach the model provider
+- The log contains no timeout or request errors
+
+### 2. Screen capture or window tracking looks wrong
+
+Check the following first:
+- You are running on Windows 10 / 11
+- FFmpeg is installed and available in PATH
+- Security software is not blocking capture or window inspection
+- You are not in a special case such as full-screen games, remote desktop, or unusual rendering modes
+
+### 3. Email reports fail to send
+
+Check the following first:
+- QQ Mail SMTP / authorization code is correct
+- The built-in test send works
+- Your local network is not blocking the mail service
+
+### 4. Updates or auto-start do not work
+
+Check the following first:
+- You are running the packaged EXE build
+- The EXE path has not changed unexpectedly
+- System permissions or security policy are not blocking startup/update behavior
 
 ---
 

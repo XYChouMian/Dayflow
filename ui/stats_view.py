@@ -17,23 +17,11 @@ from PySide6.QtGui import (
     QLinearGradient, QRadialGradient, QPaintEvent
 )
 
-from ui.themes import get_theme, get_theme_manager
+from ui.themes import get_theme, get_theme_manager, get_category_color
 from database.storage import StorageManager
 from core.types import ActivityCard
 
 logger = logging.getLogger(__name__)
-
-# 类别颜色映射 - 更鲜艳的配色
-CATEGORY_COLORS = {
-    "工作": "#3B82F6",
-    "编程": "#8B5CF6", 
-    "学习": "#10B981",
-    "会议": "#F59E0B",
-    "娱乐": "#EF4444",
-    "社交": "#EC4899",
-    "休息": "#6B7280",
-    "其他": "#94A3B8",
-}
 
 # 指标卡片渐变色
 METRIC_GRADIENTS = {
@@ -134,16 +122,17 @@ class MetricCard(QFrame):
     
     def set_change(self, change: float, suffix: str = "%"):
         """设置变化值"""
+        t = get_theme()
         self._change = change
         if change > 0:
             self._change_text = f"↑ +{change:.0f}{suffix}"
-            change_color = "#10B981"
+            change_color = t.success
         elif change < 0:
             self._change_text = f"↓ {change:.0f}{suffix}"
-            change_color = "#EF4444"
+            change_color = t.error
         else:
             self._change_text = "— 持平"
-            change_color = "#9CA3AF"
+            change_color = t.text_muted
         
         self.change_label.setText(f"vs 上周 {self._change_text}")
         self.change_label.setStyleSheet(f"font-size: 11px; color: {change_color};")
@@ -192,6 +181,8 @@ class MetricCardsRow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
+        self.apply_theme()
+        get_theme_manager().theme_changed.connect(self.apply_theme)
     
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -535,7 +526,7 @@ class BarChartWidget(QWidget):
                 if bar_height < 2:
                     continue
                 
-                color = QColor(CATEGORY_COLORS.get(cat, "#94A3B8"))
+                color = QColor(get_category_color(cat))
                 
                 # 创建渐变
                 gradient = QLinearGradient(x, current_y - bar_height, x, current_y)
@@ -719,6 +710,8 @@ class GoalWidget(QWidget):
         self._goal_hours = 8
         self._current_hours = 0
         self._setup_ui()
+        self.apply_theme()
+        get_theme_manager().theme_changed.connect(self.apply_theme)
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -842,6 +835,8 @@ class CategoryLegend(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
+        self.apply_theme()
+        get_theme_manager().theme_changed.connect(self.apply_theme)
     
     def _setup_ui(self):
         layout = QGridLayout(self)
@@ -849,10 +844,10 @@ class CategoryLegend(QWidget):
         layout.setSpacing(8)
         layout.setHorizontalSpacing(20)
         
-        categories = list(CATEGORY_COLORS.items())
+        categories = ["工作", "学习", "编程", "会议", "娱乐", "社交", "休息", "其他"]
         cols = 4  # 每行 4 个
         
-        for idx, (cat, color) in enumerate(categories):
+        for idx, cat in enumerate(categories):
             row = idx // cols
             col = idx % cols
             
@@ -864,7 +859,7 @@ class CategoryLegend(QWidget):
             # 颜色块
             color_box = QLabel()
             color_box.setFixedSize(10, 10)
-            color_box.setStyleSheet(f"background-color: {color}; border-radius: 2px;")
+            color_box.setStyleSheet(f"background-color: {get_category_color(cat)}; border-radius: 2px;")
             item_layout.addWidget(color_box)
             
             # 文字
@@ -874,6 +869,20 @@ class CategoryLegend(QWidget):
             item_layout.addStretch()
             
             layout.addWidget(item_widget, row, col)
+    
+    def apply_theme(self):
+        """应用主题 - 重新设置颜色"""
+        t = get_theme()
+        for i in range(self.layout().count()):
+            item = self.layout().itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if widget.layout():
+                    color_box = widget.layout().itemAt(0).widget()
+                    if color_box:
+                        cat = widget.layout().itemAt(1).widget().text()
+                        color_box.setStyleSheet(f"background-color: {get_category_color(cat)}; border-radius: 2px;")
+                        widget.layout().itemAt(1).widget().setStyleSheet(f"font-size: 11px; color: {t.text_primary};")
 
 
 class HourlyHeatmapWidget(QWidget):
@@ -1012,6 +1021,8 @@ class WeekCompareWidget(QWidget):
         self._this_week_score = 0
         self._last_week_score = 0
         self._setup_ui()
+        self.apply_theme()
+        get_theme_manager().theme_changed.connect(self.apply_theme)
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1112,7 +1123,7 @@ class WeekCompareWidget(QWidget):
             # 类别颜色
             color_box = QLabel()
             color_box.setFixedSize(10, 10)
-            color_box.setStyleSheet(f"background-color: {CATEGORY_COLORS.get(cat, '#94A3B8')}; border-radius: 2px;")
+            color_box.setStyleSheet(f"background-color: {get_category_color(cat)}; border-radius: 2px;")
             row.addWidget(color_box)
             
             # 类别名
@@ -1132,10 +1143,10 @@ class WeekCompareWidget(QWidget):
             diff = this_val - last_val
             if diff > 0:
                 diff_text = f"↑ +{diff:.0f}m"
-                diff_color = "#10B981"
+                diff_color = t.success
             elif diff < 0:
                 diff_text = f"↓ {diff:.0f}m"
-                diff_color = "#EF4444"
+                diff_color = t.error
             else:
                 diff_text = "—"
                 diff_color = t.text_muted
@@ -1197,10 +1208,10 @@ class WeekCompareWidget(QWidget):
             percent = (diff / last_val) * 100
             if diff > 0:
                 change_text = f"↑ {percent:.0f}%"
-                change_color = "#10B981"
+                change_color = t.success
             elif diff < 0:
                 change_text = f"↓ {abs(percent):.0f}%"
-                change_color = "#EF4444"
+                change_color = t.error
             else:
                 change_text = "持平"
                 change_color = t.text_muted
@@ -1227,6 +1238,8 @@ class DateCompareWidget(QWidget):
         self._date1_data: Dict[str, float] = {}
         self._date2_data: Dict[str, float] = {}
         self._setup_ui()
+        self.apply_theme()
+        get_theme_manager().theme_changed.connect(self.apply_theme)
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1340,7 +1353,7 @@ class DateCompareWidget(QWidget):
             color_box = QLabel()
             color_box.setFixedSize(10, 10)
             color_box.setStyleSheet(
-                f"background-color: {CATEGORY_COLORS.get(cat, '#94A3B8')}; border-radius: 2px;"
+                f"background-color: {get_category_color(cat)}; border-radius: 2px;"
             )
             row.addWidget(color_box)
             
@@ -1360,10 +1373,10 @@ class DateCompareWidget(QWidget):
             # 差异
             if diff > 0:
                 diff_text = f"↑ +{diff:.0f}m"
-                diff_color = "#10B981"
+                diff_color = t.success
             elif diff < 0:
                 diff_text = f"↓ {diff:.0f}m"
-                diff_color = "#EF4444"
+                diff_color = t.error
             else:
                 diff_text = "="
                 diff_color = t.text_muted
@@ -1512,6 +1525,9 @@ class StatsPanel(QWidget):
         self._setup_ui()
         self._load_data()
         
+        # 应用初始主题
+        self.apply_theme()
+        
         # 连接主题变化
         get_theme_manager().theme_changed.connect(self.apply_theme)
     
@@ -1532,9 +1548,9 @@ class StatsPanel(QWidget):
         header_row = QHBoxLayout()
         header_row.setSpacing(16)
         
-        title = QLabel("📊 数据统计")
-        title.setStyleSheet("font-size: 28px; font-weight: 700;")
-        header_row.addWidget(title)
+        self.title_label = QLabel("📊 数据统计")
+        self.title_label.setStyleSheet("font-size: 28px; font-weight: 700;")
+        header_row.addWidget(self.title_label)
         
         header_row.addStretch()
         
@@ -1655,6 +1671,12 @@ class StatsPanel(QWidget):
         title_label = QLabel(title)
         title_label.setObjectName("sectionTitle")
         title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        
+        # 设置正确的字体族，避免初始渲染时使用宋体
+        section_font = QFont("Microsoft YaHei", 14)
+        section_font.setBold(True)
+        title_label.setFont(section_font)
+        
         layout.addWidget(title_label)
         
         return frame
@@ -1824,7 +1846,7 @@ class StatsPanel(QWidget):
             # 更新环形图
             donut_data = []
             for cat, minutes in sorted(category_minutes.items(), key=lambda x: x[1], reverse=True):
-                color = CATEGORY_COLORS.get(cat, "#94A3B8")
+                color = get_category_color(cat)
                 donut_data.append((cat, minutes, color))
             
             center_text = f"{total_hours:.1f}h"
@@ -1879,6 +1901,12 @@ class StatsPanel(QWidget):
         """应用主题"""
         t = get_theme()
         
+        # 设置标题字体 - 确保使用正确的字体族而不是宋体
+        title_font = QFont("Microsoft YaHei", 28)
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+        self.title_label.setStyleSheet(f"font-size: 28px; font-weight: 700; color: {t.text_primary};")
+        
         # 按钮样式 - Apple 风格
         btn_style = f"""
             QPushButton {{
@@ -1914,12 +1942,20 @@ class StatsPanel(QWidget):
             }}
             QLabel#sectionTitle {{
                 color: {t.text_primary};
+                font-family: "Microsoft YaHei", "SimHei", Arial, sans-serif;
             }}
             QScrollArea {{
                 background-color: {t.bg_primary};
                 border: none;
             }}
         """)
+        
+        # 更新所有分区标题的字体
+        section_font = QFont("Microsoft YaHei", 14)
+        section_font.setBold(True)
+        for child in self.findChildren(QLabel):
+            if child.objectName() == "sectionTitle":
+                child.setFont(section_font)
         
         # 子组件主题
         self.metric_cards.apply_theme()

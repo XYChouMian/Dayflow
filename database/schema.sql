@@ -54,24 +54,34 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 每日总结表
+CREATE TABLE IF NOT EXISTS daily_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL UNIQUE,  -- 日期字符串 (YYYY-MM-DD)
+    event_summary TEXT,  -- 事件总结内容
+    inspiration_summary TEXT,  -- 灵感总结内容
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status);
 CREATE INDEX IF NOT EXISTS idx_chunks_start_time ON chunks(start_time);
 CREATE INDEX IF NOT EXISTS idx_batches_status ON analysis_batches(status);
 CREATE INDEX IF NOT EXISTS idx_cards_start_time ON timeline_cards(start_time);
 CREATE INDEX IF NOT EXISTS idx_cards_category ON timeline_cards(category);
+CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date);
 
 
--- 邮件发送记录表
-CREATE TABLE IF NOT EXISTS email_send_log (
+-- 灵感卡片表
+CREATE TABLE IF NOT EXISTS inspirations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    period TEXT NOT NULL,  -- 'noon', 'night', 或自定义时间标识
-    send_time TIMESTAMP NOT NULL,
-    success INTEGER NOT NULL DEFAULT 1,
-    error_message TEXT,
-    retry_count INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    content TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    category TEXT DEFAULT '灵感',
+    notes_json TEXT DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_email_send_log_period ON email_send_log(period);
-CREATE INDEX IF NOT EXISTS idx_email_send_log_time ON email_send_log(send_time);
+CREATE INDEX IF NOT EXISTS idx_inspirations_timestamp ON inspirations(timestamp);

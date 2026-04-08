@@ -16,6 +16,7 @@ import cv2
 import config
 from core.types import VideoChunk, ChunkStatus
 from core.window_tracker import get_tracker, WindowInfo
+from core.activity_monitor_v2 import SmartAutoPauseRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,16 @@ class ScreenRecorder:
     
     def __init__(
         self,
-        fps: int = None,
+        frame_interval: float = None,
         chunk_duration: int = None,
         output_dir: Path = None,
         on_chunk_saved: Optional[Callable[[VideoChunk], None]] = None,
         output_idx: int = 0,
+        enable_auto_pause: bool = None,
+        storage = None,
     ):
-        self.fps = fps or config.RECORD_FPS
+        self.frame_interval = frame_interval or config.RECORD_FRAME_INTERVAL
+        self.fps = 1.0 / self.frame_interval  # 计算FPS供VideoWriter使用
         self.chunk_duration = chunk_duration or config.CHUNK_DURATION_SECONDS
         self.output_dir = output_dir or config.CHUNKS_DIR
         self.on_chunk_saved = on_chunk_saved
@@ -54,10 +58,18 @@ class ScreenRecorder:
         self._current_chunk_path: Optional[Path] = None
         self._current_chunk_start: Optional[datetime] = None
         self._frame_count = 0
+        self._prev_chunk_end_time: Optional[datetime] = None  # 上一个切片的结束时间
         
         # 窗口追踪
         self._window_tracker = get_tracker()
         self._current_window_records: List[Dict] = []  # 当前切片的窗口记录
+        
+        # 活跃度感知
+        self._auto_pause_recorder: Optional[SmartAutoPauseRecorder] = None
+        self._enable_auto_pause = enable_auto_pause if enable_auto_pause is not None else config.ENABLE_AUTO_PAUSE
+        
+        # 保存storage引用
+        self._storage = storage
         
         # 确保输出目录存在
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -85,11 +97,27 @@ class ScreenRecorder:
         self._paused = False
         self._stop_event.clear()
         
+        # 启动活跃度感知
+        if self._enable_auto_pause:
+            self._auto_pause_recorder = SmartAutoPauseRecorder(
+                self,
+                stop_check_interval=config.STOP_CHECK_INTERVAL,
+                stop_detection_duration=config.STOP_DETECTION_DURATION,
+                resume_wait_duration=config.RESUME_WAIT_DURATION,
+                resume_detection_duration=config.RESUME_DETECTION_DURATION,
+                storage=self._storage
+            )
+            if self._auto_pause_recorder.start():
+                logger.info(f"智能自动暂停录制已启用")
+            else:
+                logger.warning("智能自动暂停录制启动失败，将使用普通录制模式")
+                self._auto_pause_recorder = None
+        
         # 启动录制线程
         self._record_thread = threading.Thread(target=self._recording_loop, daemon=True)
         self._record_thread.start()
         
-        logger.info(f"录制已启动 - FPS: {self.fps}, 切片时长: {self.chunk_duration}秒")
+        logger.info(f"录制已启动 - 帧间隔: {self.frame_interval}秒/帧 (FPS: {self.fps:.2f}), 切片时长: {self.chunk_duration}秒")
     
     def stop(self):
         """停止录制"""
@@ -101,11 +129,26 @@ class ScreenRecorder:
         self._stop_event.set()
         self._recording = False
         
+        # 停止活跃度感知
+        if self._auto_pause_recorder:
+            self._auto_pause_recorder.stop()
+            self._auto_pause_recorder = None
+        
         # 等待录制线程结束（缩短超时时间）
         if self._record_thread and self._record_thread.is_alive():
             self._record_thread.join(timeout=2)
             if self._record_thread.is_alive():
                 logger.warning("录制线程未能在超时内停止")
+        
+        # 记录停止时间到窗口记录
+        stop_time = datetime.now()
+        if self._current_window_records:
+            elapsed = (stop_time - self._current_chunk_start).total_seconds() if self._current_chunk_start else 0
+            self._current_window_records.append({
+                "timestamp": elapsed,
+                "event": "card_end",
+                "card_end_time": stop_time.isoformat()
+            })
         
         # 保存当前切片
         try:
@@ -134,6 +177,24 @@ class ScreenRecorder:
         if self._recording and self._paused:
             self._paused = False
             logger.info("录制已恢复")
+    
+    def is_auto_paused(self) -> bool:
+        """是否因闲置而自动暂停"""
+        if self._auto_pause_recorder:
+            return self._auto_pause_recorder.is_auto_paused()
+        return False
+    
+    def get_idle_time(self) -> float:
+        """获取闲置时间（秒）"""
+        if self._auto_pause_recorder:
+            return self._auto_pause_recorder.get_idle_time()
+        return 0.0
+    
+    def is_user_active(self) -> bool:
+        """检查用户是否活跃"""
+        if self._auto_pause_recorder:
+            return self._auto_pause_recorder.is_user_active()
+        return True
     
     def _create_camera_with_fallback(self) -> dxcam.DXCamera:
         """创建 dxcam 相机，失败时尝试多种降级参数。"""
@@ -170,7 +231,6 @@ class ScreenRecorder:
 
     def _recording_loop(self):
         """录制主循环"""
-        frame_interval = 1.0 / self.fps
         last_frame_time = 0
         last_window_info = None  # 缓存上次窗口信息
         
@@ -178,7 +238,7 @@ class ScreenRecorder:
             current_time = time.time()
             
             # 控制帧率 - 使用精确等待而非轮询
-            time_to_wait = frame_interval - (current_time - last_frame_time)
+            time_to_wait = self.frame_interval - (current_time - last_frame_time)
             if time_to_wait > 0:
                 self._stop_event.wait(min(time_to_wait, 0.5))  # 最多等待0.5秒，确保能响应停止信号
                 continue
@@ -245,12 +305,24 @@ class ScreenRecorder:
     
     def _create_new_chunk(self, frame_shape: tuple):
         """创建新的视频切片"""
-        timestamp = datetime.now()
+        # 确保新切片的开始时间等于上一个切片的结束时间
+        if self._prev_chunk_end_time is not None:
+            timestamp = self._prev_chunk_end_time
+        else:
+            timestamp = datetime.now()
+        
         filename = f"chunk_{timestamp.strftime('%Y%m%d_%H%M%S')}.mp4"
         self._current_chunk_path = self.output_dir / filename
         self._current_chunk_start = timestamp
         self._frame_count = 0
         self._current_window_records = []  # 重置窗口记录
+        
+        # 添加卡片开始时间到窗口记录（实时记录）
+        self._current_window_records.append({
+            "timestamp": 0.0,
+            "event": "card_start",
+            "card_start_time": timestamp.isoformat()
+        })
         
         # 创建 VideoWriter
         height, width = frame_shape[:2]
@@ -288,6 +360,9 @@ class ScreenRecorder:
                     logger.warning(f"保存窗口记录失败: {e}")
                     window_records_path = None
             
+            # 记录结束时间供下一个切片使用
+            self._prev_chunk_end_time = end_time
+            
             # 创建切片对象
             chunk = VideoChunk(
                 file_path=str(self._current_chunk_path),
@@ -320,20 +395,25 @@ class RecordingManager:
     整合录制器和数据库存储
     """
     
-    def __init__(self, storage_manager=None):
+    def __init__(self, storage_manager=None, scheduler=None):
         from database.storage import StorageManager
         self.storage = storage_manager or StorageManager()
+        self.scheduler = scheduler  # 分析调度器，用于触发立即扫描
         try:
             output_idx = int(self.storage.get_setting("record_output_idx", "0"))
         except Exception:
             output_idx = 0
-        self.recorder = ScreenRecorder(on_chunk_saved=self._on_chunk_saved, output_idx=output_idx)
+        self.recorder = ScreenRecorder(on_chunk_saved=self._on_chunk_saved, output_idx=output_idx, storage=self.storage)
     
     def _on_chunk_saved(self, chunk: VideoChunk):
         """切片保存回调 - 写入数据库"""
         try:
             chunk_id = self.storage.save_chunk(chunk)
             logger.info(f"切片已入库: ID={chunk_id}")
+            
+            # 立即触发分析调度器扫描，无需等待定时间隔
+            if self.scheduler:
+                self.scheduler.trigger_scan()
         except Exception as e:
             logger.error(f"切片入库失败: {e}")
     
@@ -360,3 +440,15 @@ class RecordingManager:
     @property
     def is_paused(self) -> bool:
         return self.recorder.is_paused
+    
+    def is_auto_paused(self) -> bool:
+        """是否因闲置而自动暂停"""
+        return self.recorder.is_auto_paused()
+    
+    def get_idle_time(self) -> float:
+        """获取闲置时间（秒）"""
+        return self.recorder.get_idle_time()
+    
+    def is_user_active(self) -> bool:
+        """检查用户是否活跃"""
+        return self.recorder.is_user_active()

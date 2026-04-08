@@ -114,10 +114,13 @@ class ActivityCard:
     title: str = ""  # 活动标题
     summary: str = ""  # 活动摘要
     start_time: Optional[datetime] = None  # 开始时间
-    end_time: Optional[datetime] = None  # 结束时间
     app_sites: List[AppSite] = field(default_factory=list)  # 使用的应用/网站
     distractions: List[Distraction] = field(default_factory=list)  # 分心记录
     productivity_score: float = 0.0  # 生产力评分 (0-100)
+    _next_card_start_time: Optional[datetime] = field(default=None, repr=False)  # 下一个卡片的开始时间（内部使用）
+    _merge_with_previous: bool = field(default=False, repr=False)  # 是否合并到上一张卡片
+    _updated_summary: Optional[str] = field(default=None, repr=False)  # 合并后的新描述（如果需要合并）
+    _relative_end: Optional[float] = field(default=None, repr=False)  # 相对结束时间（秒）
     
     def to_dict(self) -> dict:
         return {
@@ -126,7 +129,6 @@ class ActivityCard:
             "title": self.title,
             "summary": self.summary,
             "start_time": self.start_time.isoformat() if self.start_time else None,
-            "end_time": self.end_time.isoformat() if self.end_time else None,
             "app_sites": [a.to_dict() for a in self.app_sites],
             "distractions": [d.to_dict() for d in self.distractions],
             "productivity_score": self.productivity_score
@@ -140,17 +142,21 @@ class ActivityCard:
             title=data.get("title", ""),
             summary=data.get("summary", ""),
             start_time=datetime.fromisoformat(data["start_time"]) if data.get("start_time") else None,
-            end_time=datetime.fromisoformat(data["end_time"]) if data.get("end_time") else None,
             app_sites=[AppSite.from_dict(a) for a in data.get("app_sites", [])],
             distractions=[Distraction.from_dict(d) for d in data.get("distractions", [])],
             productivity_score=data.get("productivity_score", 0.0)
         )
     
     @property
+    def end_time(self) -> Optional[datetime]:
+        """结束时间（从下一个卡片的开始时间获取）"""
+        return self._next_card_start_time
+    
+    @property
     def duration_minutes(self) -> float:
         """活动持续时间（分钟）"""
-        if self.start_time and self.end_time:
-            delta = self.end_time - self.start_time
+        if self.start_time and self._next_card_start_time:
+            delta = self._next_card_start_time - self.start_time
             return delta.total_seconds() / 60
         return 0
 
@@ -201,3 +207,34 @@ class AnalysisBatch:
             "observations_json": self.observations_json,
             "error_message": self.error_message
         }
+
+
+@dataclass
+class InspirationCard:
+    """
+    灵感卡片 - 记录用户的灵感和想法
+    """
+    id: Optional[int] = None
+    content: str = ""  # 灵感内容
+    timestamp: Optional[datetime] = None  # 记录时间（时间点）
+    category: str = "灵感"  # 类别（如：灵感、想法、待办等）
+    notes: List[str] = field(default_factory=list)  # 备注
+    
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "category": self.category,
+            "notes": self.notes
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "InspirationCard":
+        return cls(
+            id=data.get("id"),
+            content=data.get("content", ""),
+            timestamp=datetime.fromisoformat(data["timestamp"]) if data.get("timestamp") else None,
+            category=data.get("category", "灵感"),
+            notes=data.get("notes", data.get("tags", []))
+        )

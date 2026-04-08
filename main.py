@@ -70,6 +70,7 @@ def check_pending_update():
 def check_autostart_path():
     """检测自启动路径是否变化"""
     from core.autostart import check_path_changed, update_autostart_path
+    from ui.themes import create_themed_message_box
     
     changed, old_path, new_path = check_path_changed()
     if changed:
@@ -77,22 +78,27 @@ def check_autostart_path():
         logger.warning(f"检测到 EXE 路径变化: {old_path} -> {new_path}")
         
         # 弹窗询问用户是否更新
-        reply = QMessageBox.question(
-            None,
-            "路径变化",
-            f"检测到程序位置已变化：\n\n"
-            f"原路径：{old_path}\n"
-            f"新路径：{new_path}\n\n"
-            f"是否更新开机自启动设置？",
-            QMessageBox.Yes | QMessageBox.No
-        )
+        msg_box = create_themed_message_box(None)
+        msg_box.setWindowTitle("路径变化")
+        msg_box.setText(f"检测到程序位置已变化：\n\n原路径：{old_path}\n新路径：{new_path}\n\n是否更新开机自启动设置？")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+        reply = msg_box.exec()
         
         if reply == QMessageBox.Yes:
             success, msg = update_autostart_path()
             if success:
-                QMessageBox.information(None, "成功", "自启动路径已更新")
+                msg_box = create_themed_message_box(None)
+                msg_box.setWindowTitle("成功")
+                msg_box.setText("自启动路径已更新")
+                msg_box.setIcon(QMessageBox.Information)
+                msg_box.exec()
             else:
-                QMessageBox.warning(None, "失败", msg)
+                msg_box = create_themed_message_box(None)
+                msg_box.setWindowTitle("失败")
+                msg_box.setText(msg)
+                msg_box.setIcon(QMessageBox.Warning)
+                msg_box.exec()
 
 
 def main():

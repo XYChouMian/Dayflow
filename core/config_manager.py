@@ -17,10 +17,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ConfigKey:
     """配置键定义"""
-    EMAIL_SEND_TIMES: str = "email_send_times"  # JSON: ["12:00", "22:00"]
     VIDEO_MAX_FRAMES: str = "video_max_frames"  # int: 8
     API_TIMEOUT: str = "api_timeout"  # float: 120.0
-    BATCH_DURATION_MINUTES: str = "batch_duration_minutes"  # int: 15
+    BATCH_CHUNK_COUNT: str = "batch_chunk_count"  # int: 15
     LOG_MAX_SIZE_MB: str = "log_max_size_mb"  # int: 5
     LOG_BACKUP_COUNT: str = "log_backup_count"  # int: 5
     LOG_RETENTION_DAYS: str = "log_retention_days"  # int: 30
@@ -31,10 +30,9 @@ class ConfigKey:
 
 # 默认值映射 (从 config.py 或硬编码)
 DEFAULT_VALUES = {
-    ConfigKey.EMAIL_SEND_TIMES: '["12:00", "22:00"]',
     ConfigKey.VIDEO_MAX_FRAMES: "8",
     ConfigKey.API_TIMEOUT: "120.0",
-    ConfigKey.BATCH_DURATION_MINUTES: str(getattr(config, 'BATCH_DURATION_MINUTES', 15)),
+    ConfigKey.BATCH_CHUNK_COUNT: str(getattr(config, 'BATCH_CHUNK_COUNT', 15)),
     ConfigKey.LOG_MAX_SIZE_MB: "5",
     ConfigKey.LOG_BACKUP_COUNT: "5",
     ConfigKey.LOG_RETENTION_DAYS: "30",
@@ -139,46 +137,7 @@ class ConfigManager(QObject):
         
         # 发出变更信号
         self.config_changed.emit(key, value)
-    
-    def get_email_send_times(self) -> List[Tuple[int, int]]:
-        """
-        获取邮件发送时间列表
-        
-        Returns:
-            [(hour, minute), ...] 格式的时间列表
-        """
-        times_str = self.get(ConfigKey.EMAIL_SEND_TIMES, '["12:00", "22:00"]')
-        
-        result = []
-        try:
-            if isinstance(times_str, str):
-                times_list = json.loads(times_str)
-            else:
-                times_list = times_str
-            
-            for time_str in times_list:
-                if isinstance(time_str, str) and ':' in time_str:
-                    parts = time_str.split(':')
-                    hour = int(parts[0])
-                    minute = int(parts[1])
-                    if 0 <= hour <= 23 and 0 <= minute <= 59:
-                        result.append((hour, minute))
-        except Exception as e:
-            logger.warning(f"解析邮件发送时间失败: {e}，使用默认值")
-            result = [(12, 0), (22, 0)]
-        
-        return result if result else [(12, 0), (22, 0)]
-    
-    def set_email_send_times(self, times: List[Tuple[int, int]]) -> None:
-        """
-        设置邮件发送时间列表
-        
-        Args:
-            times: [(hour, minute), ...] 格式的时间列表
-        """
-        times_str_list = [f"{h:02d}:{m:02d}" for h, m in times]
-        self.set(ConfigKey.EMAIL_SEND_TIMES, json.dumps(times_str_list))
-    
+
     def get_int(self, key: str, default: int = 0) -> int:
         """获取整数配置值"""
         value = self.get(key, default)
@@ -209,17 +168,10 @@ class ConfigManager(QObject):
         if not str_value:
             return None
         
-        # JSON 类型的配置
-        if key == ConfigKey.EMAIL_SEND_TIMES:
-            try:
-                return json.loads(str_value)
-            except json.JSONDecodeError:
-                return str_value
-        
         # 整数类型
         int_keys = {
             ConfigKey.VIDEO_MAX_FRAMES,
-            ConfigKey.BATCH_DURATION_MINUTES,
+            ConfigKey.BATCH_CHUNK_COUNT,
             ConfigKey.LOG_MAX_SIZE_MB,
             ConfigKey.LOG_BACKUP_COUNT,
             ConfigKey.LOG_RETENTION_DAYS,

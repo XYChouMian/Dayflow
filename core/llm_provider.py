@@ -9,7 +9,7 @@ import logging
 import re
 from pathlib import Path
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import unquote
 
 import httpx
@@ -46,14 +46,21 @@ JSON 格式：
       "category": "编程",
       "title": "Dayflow 项目开发",
       "summary": "实现用户登录功能，编写单元测试",
-      "start_time": "2024-01-01T10:00:00",
-      "end_time": "2024-01-01T11:30:00",
+      "end_ts": 5400,
       "app_sites": [{"name": "VS Code", "duration_seconds": 5400}],
       "distractions": [],
-      "productivity_score": 85
+      "productivity_score": 85,
+      "merge_with_previous": false,
+      "updated_summary": null
     }
   ]
 }
+
+重要：只返回结束时间，不要推断开始时间！
+- end_ts：活动结束时间（相对于录制开始的秒数）
+- 活动的开始时间由系统根据视频录制时间点自动设置
+- 确保每张卡片的 end_ts 值合理，不要随意扩展或缩短时间范围！
+- 只根据已观察到的记录生成卡片，不要预测或推测未来的活动
 
 类别定义：
 - 编程：写代码、调试、代码审查
@@ -75,11 +82,79 @@ productivity_score 评分标准：
 合并规则：连续相同应用且相似活动 → 合并为一张卡片
 拆分规则：同一时段内切换不同类型活动 → 拆分为多张卡片
 
+【重要：合并卡片逻辑】
+如果提供了"上一张卡片信息"，你需要判断当前活动是否应该：
+1. 创建新卡片（merge_with_previous = false）- 当活动类型、应用或内容发生明显变化时
+2. 合并到上一张卡片（merge_with_previous = true）- 当活动与上一张卡片是连续的相同类型活动时
+
+当决定合并时：
+- 设置 merge_with_previous = true
+- 在 updated_summary 中提供合并后的完整描述，必须涵盖上一张卡片和当前卡片的所有活动内容
+- 确保更新后的描述清晰、完整，不遗漏任何重要信息
+- 不要只描述新内容，要包含从上一张卡片开始的所有活动
+
+合并判断标准：
+- 相同应用且活动类型相似 → 合并
+- 活动是延续性的（继续做同一件事） → 合并
+- 活动有明显变化（换应用、换任务、换类型） → 新建卡片
+
 跨批次连续性：
 - 如果"前序活动卡片"的最后一张与当前观察记录的开头是同类活动，考虑延续而非新建
 - 检查前序卡片的 category 和 title，如果当前活动是其延续，在 title 中体现连续性
 
 只返回 JSON"""
+
+DAILY_SUMMARY_SYSTEM_PROMPT = """你是时间管理助手。根据一天的活动记录生成总结报告。
+
+请按以下结构生成总结：
+
+1. 工作概览
+- 简要描述今天的主要工作内容
+- 统计工作时长和效率评分
+
+2. 重点成果
+- 列出今天完成的重要任务或进展
+- 突出有价值的成果
+
+3. 效率分析
+- 分析专注时段和低效时段
+- 识别影响效率的因素
+
+4. 改进建议
+- 针对今天的表现提出具体建议
+- 推荐更好的时间管理方法
+
+5. 明日规划
+- 基于今天的进度，建议明天的重点工作
+
+总结要求：
+- 语言简洁明了，避免冗余
+- 突出重点，使用要点形式
+- 保持积极鼓励的语气
+- 提供可操作的建议"""
+
+
+INSPIRATION_SUMMARY_SYSTEM_PROMPT = """你是创意思考助手。根据一天记录的灵感卡片生成总结和延伸思考。
+
+请按以下结构生成总结：
+
+1. 灵感总结
+- 总结今天记录的所有灵感
+- 按类别（灵感、想法、待办等）进行归纳
+- 提取核心观点和关键想法
+
+2. 延伸思考
+- 分析灵感之间的内在联系
+- 探索灵感背后的深层意义
+- 从不同角度对灵感进行拓展
+- 提出可能的行动方案或实践建议
+- 思考如何将灵感转化为实际成果
+
+总结要求：
+- 深度思考，挖掘灵感价值
+- 创造性拓展，提供新的视角
+- 理论联系实际，给出可行建议
+- 语言富有启发性，激发更多思考"""
 
 
 class DayflowBackendProvider:
@@ -89,7 +164,7 @@ class DayflowBackendProvider:
     """
 
     FILE_HINT_BLACKLIST = {
-        "visual studio code", "cursor", "google chrome", "microsoft edge", "firefox",
+        "visual studio code", "trae", "cursor", "google chrome", "microsoft edge", "firefox",
         "wechat", "qq", "telegram", "discord", "notion", "obsidian", "typora",
         "microsoft word", "microsoft excel", "powerpoint", "outlook",
         "文件资源管理器", "windows terminal", "powershell", "cmd", "unknown"
@@ -100,14 +175,19 @@ class DayflowBackendProvider:
         api_base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: float = 120.0
+        timeout: Optional[float] = None,
+        thinking_mode: Optional[str] = None,
+        text_model: Optional[str] = None,
     ):
         self.api_base_url = (api_base_url or config.API_BASE_URL).rstrip("/")
         self.api_key = api_key or config.API_KEY
         self.model = model or config.API_MODEL
-        self.timeout = timeout
+        self.text_model = text_model or config.DAILY_SUMMARY_MODEL
+        self.timeout = timeout if timeout is not None else config.API_TIMEOUT
+        self.thinking_mode = thinking_mode or config.VISUAL_THINKING_MODE
         
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop_id: Optional[int] = None
     
     @property
     def headers(self) -> dict:
@@ -119,11 +199,31 @@ class DayflowBackendProvider:
     
     async def _get_client(self) -> httpx.AsyncClient:
         """获取或创建异步 HTTP 客户端"""
-        if self._client is None or self._client.is_closed:
+        try:
+            current_loop = asyncio.get_running_loop()
+            current_loop_id = id(current_loop)
+        except RuntimeError:
+            current_loop = None
+            current_loop_id = None
+        
+        need_new_client = (
+            self._client is None or 
+            self._client.is_closed or
+            self._client_loop_id != current_loop_id
+        )
+        
+        if need_new_client:
+            if self._client and not self._client.is_closed:
+                try:
+                    await self._client.aclose()
+                except Exception:
+                    pass
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.timeout),
                 headers=self.headers
             )
+            self._client_loop_id = current_loop_id
+        
         return self._client
     
     async def close(self):
@@ -155,8 +255,9 @@ class DayflowBackendProvider:
             cap.release()
             return frames_base64
         
-        # 均匀采样帧
-        frame_indices = [int(i * total_frames / max_frames) for i in range(max_frames)]
+        # 均匀采样帧（不重复）
+        actual_frames = min(max_frames, total_frames)
+        frame_indices = [int(i * total_frames / actual_frames) for i in range(actual_frames)]
         
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -172,6 +273,15 @@ class DayflowBackendProvider:
         
         cap.release()
         return frames_base64
+    
+    def _supports_thinking(self, model: str) -> bool:
+        """检查模型是否支持 thinking 参数（仅 GLM-4.5 及以上）"""
+        thinking_supported_models = [
+            "glm-4.5", "glm-4.6", "glm-4.7", "glm-5",
+            "glm-4.5v", "glm-4.6v", "glm-4.7v",
+        ]
+        model_lower = model.lower()
+        return any(supported in model_lower for supported in thinking_supported_models)
     
     def _extract_message_content(self, message_content) -> str:
         """兼容不同 OpenAI/Gemini 兼容服务的 message.content 返回格式。"""
@@ -249,26 +359,36 @@ class DayflowBackendProvider:
     async def _chat_completion(
         self,
         messages: List[dict],
-        temperature: float = 0.3
+        model: Optional[str] = None,
+        thinking_mode: Optional[str] = None
     ) -> str:
         """
         调用 Chat Completions API
         
         Args:
             messages: 消息列表
-            temperature: 温度参数
+            model: 模型名称（可选，不传则使用默认模型）
+            thinking_mode: 思考模式（可选，不传则使用默认思考模式）
             
         Returns:
             str: 模型返回的内容
         """
         client = await self._get_client()
         
+        actual_model = model or self.model
+        actual_thinking_mode = thinking_mode if thinking_mode is not None else self.thinking_mode
+        
         request_body = {
-            "model": self.model,
+            "model": actual_model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": 4096
         }
+        
+        # thinking 参数仅 GLM-4.5 及以上模型支持
+        if self._supports_thinking(actual_model):
+            if actual_thinking_mode == "enabled":
+                request_body["thinking"] = {"type": "enabled"}
+            else:
+                request_body["thinking"] = {"type": "disabled"}
         
         try:
             response = await client.post(
@@ -298,7 +418,9 @@ class DayflowBackendProvider:
             logger.error(f"API 请求失败: {e.response.status_code} - {e.response.text}")
             raise
         except Exception as e:
-            logger.error(f"API 请求异常: {e}")
+            import traceback
+            logger.error(f"API 请求异常: {type(e).__name__}: {e}")
+            logger.error(f"异常堆栈:\n{traceback.format_exc()}")
             raise
     
     async def transcribe_video(
@@ -329,6 +451,8 @@ class DayflowBackendProvider:
         if not frames:
             logger.warning(f"无法从视频提取帧: {video_path}")
             return []
+        
+        logger.info(f"开始分析视频: {video_file.name} ({duration:.0f}秒, {len(frames)}帧)")
         
         # 构建窗口信息文本（包含窗口标题/文件名/页面标题）
         window_info_text = ""
@@ -377,6 +501,8 @@ class DayflowBackendProvider:
         try:
             response_text = await self._chat_completion(messages)
             observations = self._parse_observations_from_text(response_text, duration)
+            
+            logger.info(f"视频分析完成: {video_file.name} -> {len(observations)} 条观察记录")
             
             # 后处理：用真实窗口信息覆盖 AI 返回的 app_name
             if window_records and observations:
@@ -495,10 +621,19 @@ class DayflowBackendProvider:
         if start_time:
             obs_text += f"\n录制开始时间: {start_time.isoformat()}"
         
-        # 添加前序卡片上下文
+        # 添加前序卡片上下文（重点：上一张卡片的详细信息用于判断是否合并）
         if context_cards:
-            obs_text += "\n\n前序活动卡片：\n"
-            for card in context_cards[-3:]:  # 只取最近3个
+            obs_text += "\n\n【上一张卡片信息】（用于判断是否合并）：\n"
+            prev_card = context_cards[-1]
+            obs_text += f"类别: {prev_card.category}\n"
+            obs_text += f"标题: {prev_card.title}\n"
+            obs_text += f"描述: {prev_card.summary}\n"
+            if prev_card.app_sites:
+                apps = ", ".join([app.name for app in prev_card.app_sites])
+                obs_text += f"应用: {apps}\n"
+            
+            obs_text += "\n【前序活动卡片】（最近3个用于参考上下文）：\n"
+            for card in context_cards[-3:]:
                 obs_text += f"- {card.category}: {card.title}\n"
         
         if prompt:
@@ -510,8 +645,13 @@ class DayflowBackendProvider:
         ]
         
         try:
-            response_text = await self._chat_completion(messages)
-            return self._parse_cards_from_text(response_text, start_time)
+            logger.info(f"开始生成活动卡片: {len(observations)} 条观察记录")
+            response_text = await self._chat_completion(messages, model=self.text_model)
+            
+            total_duration = max((obs.end_ts for obs in observations), default=0)
+            cards = self._parse_cards_from_text(response_text, start_time, total_duration)
+            logger.info(f"活动卡片生成完成: {len(cards)} 张卡片")
+            return cards
         except Exception as e:
             logger.error(f"卡片生成失败: {e}")
             return []
@@ -548,9 +688,10 @@ class DayflowBackendProvider:
         
         return observations
     
-    def _parse_cards_from_text(self, text: str, start_time: Optional[datetime]) -> List[ActivityCard]:
+    def _parse_cards_from_text(self, text: str, start_time: Optional[datetime], total_duration: float = 0) -> List[ActivityCard]:
         """从文本响应中解析活动卡片"""
         cards = []
+        now = datetime.now().replace(tzinfo=None)
         
         try:
             json_match = re.search(r'\{[\s\S]*\}', text)
@@ -559,23 +700,22 @@ class DayflowBackendProvider:
                 items = data.get("cards", [])
                 
                 for item in items:
-                    # 解析时间
-                    card_start = None
-                    card_end = None
+                    # 解析相对时间（秒数）
+                    # 注意：不再解析start_ts，开始时间由系统根据视频录制时间点设置
+                    card_end_ts = None
                     
-                    if item.get("start_time"):
-                        try:
-                            card_start = datetime.fromisoformat(item["start_time"].replace("Z", "+00:00"))
-                        except:
-                            card_start = start_time
-                    else:
-                        card_start = start_time
+                    # 只解析结束时间戳
+                    if item.get("end_ts") is not None:
+                        card_end_ts = float(item.get("end_ts", 0))
                     
-                    if item.get("end_time"):
-                        try:
-                            card_end = datetime.fromisoformat(item["end_time"].replace("Z", "+00:00"))
-                        except:
-                            pass
+                    # 验证时间戳在合理范围内
+                    if card_end_ts is not None and card_end_ts < 0:
+                        logger.warning(f"卡片结束时间戳为负数，修正为0: {card_end_ts}")
+                        card_end_ts = 0
+                    
+                    if card_end_ts is not None and total_duration > 0 and card_end_ts > total_duration:
+                        logger.warning(f"卡片结束时间戳超过观察记录时长，修正: {card_end_ts} -> {total_duration}")
+                        card_end_ts = total_duration
                     
                     # 解析应用列表
                     app_sites = []
@@ -598,12 +738,21 @@ class DayflowBackendProvider:
                         category=item.get("category", "其他"),
                         title=item.get("title", "未命名活动"),
                         summary=item.get("summary", ""),
-                        start_time=card_start,
-                        end_time=card_end,
+                        start_time=None,  # 稍后在analysis.py中设置
                         app_sites=app_sites,
                         distractions=distractions,
                         productivity_score=float(item.get("productivity_score", 0))
                     )
+                    
+                    # 只存储结束时间的相对时间戳，用于后续转换为绝对时间
+                    # 开始时间由系统根据视频录制时间点设置，不再使用AI推断的时间
+                    if card_end_ts is not None:
+                        card._relative_end = card_end_ts
+                    
+                    # 解析合并相关字段
+                    card._merge_with_previous = bool(item.get("merge_with_previous", False))
+                    card._updated_summary = item.get("updated_summary")
+                    
                     cards.append(card)
                     
         except json.JSONDecodeError as e:
@@ -621,10 +770,283 @@ class DayflowBackendProvider:
             logger.warning(f"API 健康检查失败: {e}")
             return False
     
-    async def test_connection(self) -> tuple[bool, str]:
+    async def generate_daily_summary(
+        self,
+        cards: List[ActivityCard],
+        date: Optional[datetime] = None,
+        model: Optional[str] = None,
+        thinking_mode: Optional[str] = None,
+        inspiration_cards: Optional[List] = None
+    ) -> tuple[str, str]:
         """
-        测试 API 连接
+        生成每日总结（包含事件总结和灵感总结）
         
+        Args:
+            cards: 活动卡片列表
+            date: 日期（可选）
+            model: 模型名称（可选，不传则使用默认的每日总结模型）
+            thinking_mode: 思考模式（可选，不传则使用默认的每日总结思考模式）
+            inspiration_cards: 灵感卡片列表（可选）
+            
+        Returns:
+            (event_summary, inspiration_summary): 事件总结内容和灵感总结内容
+        """
+        # 使用配置的每日总结模型，如果未指定
+        summary_model = model or config.DAILY_SUMMARY_MODEL
+        summary_thinking_mode = thinking_mode if thinking_mode is not None else config.SUMMARY_THINKING_MODE
+        
+        # 生成事件总结
+        if not cards:
+            event_summary = "今天没有活动记录。"
+        else:
+            # 构建活动记录文本
+            cards_text = f"日期: {date.strftime('%Y-%m-%d')}\n\n" if date else ""
+            cards_text += "今日活动记录：\n"
+            
+            # 按类别分组统计
+            category_stats: Dict[str, int] = {}
+            total_duration = 0
+            
+            for card in cards:
+                duration_min = int(card.duration_minutes)
+                total_duration += duration_min
+                category_stats[card.category] = category_stats.get(card.category, 0) + duration_min
+                
+                cards_text += f"\n[{card.start_time.strftime('%H:%M')} - {card.end_time.strftime('%H:%M')} ({duration_min}分钟)]\n"
+                cards_text += f"类别: {card.category}\n"
+                cards_text += f"标题: {card.title}\n"
+                if card.summary:
+                    cards_text += f"详情: {card.summary}\n"
+                cards_text += f"效率评分: {card.productivity_score}\n"
+                
+                if card.app_sites:
+                    cards_text += f"应用: {', '.join([site.name for site in card.app_sites])}\n"
+                
+                if card.distractions:
+                    cards_text += f"干扰: {', '.join([d.description for d in card.distractions])}\n"
+            
+            # 添加统计信息
+            cards_text += f"\n\n统计信息：\n"
+            cards_text += f"总时长: {total_duration} 分钟\n"
+            cards_text += "各类别时长:\n"
+            for category, duration in sorted(category_stats.items(), key=lambda x: x[1], reverse=True):
+                cards_text += f"- {category}: {duration} 分钟\n"
+            
+            # 计算平均效率
+            avg_productivity = sum(card.productivity_score for card in cards) / len(cards) if cards else 0
+            cards_text += f"平均效率评分: {avg_productivity:.1f}\n"
+            
+            messages = [
+                {"role": "system", "content": DAILY_SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": cards_text}
+            ]
+            
+            try:
+                logger.info(f"开始生成事件总结: {len(cards)} 张活动卡片，使用模型: {summary_model}, 思考模式: {summary_thinking_mode}")
+                event_summary = await self._chat_completion(messages, model=summary_model, thinking_mode=summary_thinking_mode)
+                logger.info(f"事件总结生成完成，字数: {len(event_summary)}")
+            except Exception as e:
+                logger.error(f"事件总结生成失败: {e}")
+                event_summary = f"总结生成失败: {str(e)}"
+        
+        # 生成灵感总结
+        if not inspiration_cards or len(inspiration_cards) == 0:
+            inspiration_summary = "今天没有灵感记录。"
+        else:
+            # 构建灵感记录文本
+            inspiration_text = f"日期: {date.strftime('%Y-%m-%d')}\n\n" if date else ""
+            inspiration_text += f"今日灵感记录（共 {len(inspiration_cards)} 条）：\n\n"
+            
+            # 按类别分组
+            category_inspirations: Dict[str, List] = {}
+            for card in inspiration_cards:
+                if card.category not in category_inspirations:
+                    category_inspirations[card.category] = []
+                category_inspirations[card.category].append(card)
+            
+            # 按类别输出
+            for category, cards in sorted(category_inspirations.items()):
+                inspiration_text += f"【{category}】\n"
+                for idx, card in enumerate(cards, 1):
+                    inspiration_text += f"{idx}. {card.content}\n"
+                    if card.timestamp:
+                        inspiration_text += f"   时间: {card.timestamp.strftime('%H:%M')}\n"
+                    if card.notes:
+                        inspiration_text += f"   备注: {', '.join(card.notes)}\n"
+                    inspiration_text += "\n"
+            
+            messages = [
+                {"role": "system", "content": INSPIRATION_SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": inspiration_text}
+            ]
+            
+            try:
+                logger.info(f"开始生成灵感总结: {len(inspiration_cards)} 条灵感记录，使用模型: {summary_model}, 思考模式: {summary_thinking_mode}")
+                inspiration_summary = await self._chat_completion(messages, model=summary_model, thinking_mode=summary_thinking_mode)
+                logger.info(f"灵感总结生成完成，字数: {len(inspiration_summary)}")
+            except Exception as e:
+                logger.error(f"灵感总结生成失败: {e}")
+                inspiration_summary = f"灵感总结生成失败: {str(e)}"
+        
+        return event_summary, inspiration_summary
+    
+    async def generate_event_summary(
+        self,
+        cards: List[ActivityCard],
+        date: Optional[datetime] = None,
+        model: Optional[str] = None,
+        thinking_mode: Optional[str] = None
+    ) -> str:
+        """
+        生成事件总结
+        
+        Args:
+            cards: 活动卡片列表
+            date: 日期（可选）
+            model: 模型名称（可选，不传则使用默认的每日总结模型）
+            thinking_mode: 思考模式（可选，不传则使用默认的每日总结思考模式）
+            
+        Returns:
+            事件总结内容
+        """
+        # 使用配置的每日总结模型，如果未指定
+        summary_model = model or config.DAILY_SUMMARY_MODEL
+        summary_thinking_mode = thinking_mode if thinking_mode is not None else config.SUMMARY_THINKING_MODE
+        
+        # 生成事件总结
+        if not cards:
+            event_summary = "今天没有活动记录。"
+        else:
+            # 构建活动记录文本
+            cards_text = f"日期: {date.strftime('%Y-%m-%d')}\n\n" if date else ""
+            cards_text += "今日活动记录：\n"
+            
+            # 按类别分组统计
+            category_stats: Dict[str, int] = {}
+            total_duration = 0
+            
+            for card in cards:
+                duration_min = int(card.duration_minutes)
+                total_duration += duration_min
+                category_stats[card.category] = category_stats.get(card.category, 0) + duration_min
+                
+                cards_text += f"\n[{card.start_time.strftime('%H:%M')} - {card.end_time.strftime('%H:%M')} ({duration_min}分钟)]\n"
+                cards_text += f"类别: {card.category}\n"
+                cards_text += f"标题: {card.title}\n"
+                if card.summary:
+                    cards_text += f"详情: {card.summary}\n"
+                cards_text += f"效率评分: {card.productivity_score}\n"
+                
+                if card.app_sites:
+                    cards_text += f"应用: {', '.join([site.name for site in card.app_sites])}\n"
+                
+                if card.distractions:
+                    cards_text += f"干扰: {', '.join([d.description for d in card.distractions])}\n"
+            
+            # 添加统计信息
+            cards_text += f"\n\n统计信息：\n"
+            cards_text += f"总时长: {total_duration} 分钟\n"
+            cards_text += "各类别时长:\n"
+            for category, duration in sorted(category_stats.items(), key=lambda x: x[1], reverse=True):
+                cards_text += f"- {category}: {duration} 分钟\n"
+            
+            # 计算平均效率
+            avg_productivity = sum(card.productivity_score for card in cards) / len(cards) if cards else 0
+            cards_text += f"平均效率评分: {avg_productivity:.1f}\n"
+            
+            messages = [
+                {"role": "system", "content": DAILY_SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": cards_text}
+            ]
+            
+            try:
+                logger.info(f"开始生成事件总结: {len(cards)} 张活动卡片，使用模型: {summary_model}, 思考模式: {summary_thinking_mode}")
+                event_summary = await self._chat_completion(messages, model=summary_model, thinking_mode=summary_thinking_mode)
+                logger.info(f"事件总结生成完成，字数: {len(event_summary)}")
+            except Exception as e:
+                logger.error(f"事件总结生成失败: {e}")
+                event_summary = f"总结生成失败: {str(e)}"
+        
+        return event_summary
+    
+    async def generate_inspiration_summary(
+        self,
+        event_summary: str,
+        inspiration_cards: List,
+        date: Optional[datetime] = None,
+        model: Optional[str] = None,
+        thinking_mode: Optional[str] = None
+    ) -> str:
+        """
+        生成灵感总结（基于事件总结和灵感卡片）
+        
+        Args:
+            event_summary: 事件总结内容
+            inspiration_cards: 灵感卡片列表
+            date: 日期（可选）
+            model: 模型名称（可选，不传则使用默认的每日总结模型）
+            thinking_mode: 思考模式（可选，不传则使用默认的每日总结思考模式）
+            
+        Returns:
+            灵感总结内容
+        """
+        # 使用配置的每日总结模型，如果未指定
+        summary_model = model or config.DAILY_SUMMARY_MODEL
+        summary_thinking_mode = thinking_mode if thinking_mode is not None else config.SUMMARY_THINKING_MODE
+        
+        # 生成灵感总结
+        if not inspiration_cards or len(inspiration_cards) == 0:
+            inspiration_summary = "今天没有灵感记录。"
+        else:
+            # 构建灵感记录文本
+            inspiration_text = f"日期: {date.strftime('%Y-%m-%d')}\n\n" if date else ""
+            
+            # 只有当事件总结已生成时才添加事件总结
+            if event_summary and event_summary.strip():
+                inspiration_text += f"今日事件总结：\n{event_summary}\n\n"
+            
+            inspiration_text += f"今日灵感记录（共 {len(inspiration_cards)} 条）：\n\n"
+            
+            # 按类别分组
+            category_inspirations: Dict[str, List] = {}
+            for card in inspiration_cards:
+                if card.category not in category_inspirations:
+                    category_inspirations[card.category] = []
+                category_inspirations[card.category].append(card)
+            
+            # 按类别输出
+            for category, cards in sorted(category_inspirations.items()):
+                inspiration_text += f"【{category}】\n"
+                for idx, card in enumerate(cards, 1):
+                    inspiration_text += f"{idx}. {card.content}\n"
+                    if card.timestamp:
+                        inspiration_text += f"   时间: {card.timestamp.strftime('%H:%M')}\n"
+                    if card.notes:
+                        inspiration_text += f"   备注: {', '.join(card.notes)}\n"
+                    inspiration_text += "\n"
+            
+            messages = [
+                {"role": "system", "content": INSPIRATION_SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": inspiration_text}
+            ]
+            
+            try:
+                logger.info(f"开始生成灵感总结: {len(inspiration_cards)} 条灵感记录，使用模型: {summary_model}, 思考模式: {summary_thinking_mode}")
+                inspiration_summary = await self._chat_completion(messages, model=summary_model, thinking_mode=summary_thinking_mode)
+                logger.info(f"灵感总结生成完成，字数: {len(inspiration_summary)}")
+            except Exception as e:
+                logger.error(f"灵感总结生成失败: {e}")
+                inspiration_summary = f"灵感总结生成失败: {str(e)}"
+        
+        return inspiration_summary
+    
+    async def test_connection(self, test_image: bool = True) -> tuple[bool, str]:
+        """
+        测试 API 连接（包含图片测试）
+        
+        Args:
+            test_image: 是否测试图片发送能力
+            
         Returns:
             tuple[bool, str]: (是否成功, 消息)
         """
@@ -632,9 +1054,42 @@ class DayflowBackendProvider:
             return False, "API Key 未配置"
         
         try:
-            messages = [{"role": "user", "content": "你好，请回复'测试成功'"}]
-            response = await self._chat_completion(messages)
-            return True, f"连接成功！模型: {self.model}\n回复: {response[:100]}"
+            if test_image:
+                red_image = self._create_test_image([255, 0, 0])
+                green_image = self._create_test_image([0, 255, 0])
+                blue_image = self._create_test_image([0, 0, 255])
+                
+                content = [
+                    {"type": "text", "text": "这里有三张纯色图片，请分别告诉我第一张、第二张、第三张图片分别是什么颜色。"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{red_image}",
+                            "detail": "low"
+                        }
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{green_image}",
+                            "detail": "low"
+                        }
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{blue_image}",
+                            "detail": "low"
+                        }
+                    }
+                ]
+                messages = [{"role": "user", "content": content}]
+                response = await self._chat_completion(messages)
+                return True, f"连接成功！模型: {self.model}\n视觉测试通过，回复: {response[:150]}"
+            else:
+                messages = [{"role": "user", "content": "你好，请回复'测试成功'"}]
+                response = await self._chat_completion(messages)
+                return True, f"连接成功！模型: {self.model}\n回复: {response[:100]}"
         except httpx.HTTPStatusError as e:
             return False, f"HTTP 错误 {e.response.status_code}: {e.response.text[:200]}"
         except httpx.ConnectError:
@@ -643,16 +1098,42 @@ class DayflowBackendProvider:
             return False, "连接超时"
         except Exception as e:
             return False, f"错误: {str(e)}"
+    
+    def _create_test_image(self, color: List[int] = None) -> str:
+        """创建一个简单的测试图片（纯色）并返回 base64
+        
+        Args:
+            color: RGB颜色值，默认为红色[255, 0, 0]
+            
+        Returns:
+            base64编码的图片字符串
+        """
+        import cv2
+        import numpy as np
+        import base64
+        
+        if color is None:
+            color = [255, 0, 0]
+        
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        img[:, :] = color
+        
+        _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return base64.b64encode(buffer).decode('utf-8')
 
 
 # 便捷函数：同步调用
 def transcribe_video_sync(video_path: str, duration: float, **kwargs) -> List[Observation]:
     """同步版本的视频分析"""
     provider = DayflowBackendProvider(**kwargs)
-    try:
-        return asyncio.run(provider.transcribe_video(video_path, duration))
-    finally:
-        asyncio.run(provider.close())
+    
+    async def _run():
+        try:
+            return await provider.transcribe_video(video_path, duration)
+        finally:
+            await provider.close()
+    
+    return asyncio.run(_run())
 
 
 def generate_cards_sync(
@@ -662,7 +1143,70 @@ def generate_cards_sync(
 ) -> List[ActivityCard]:
     """同步版本的卡片生成"""
     provider = DayflowBackendProvider(**kwargs)
-    try:
-        return asyncio.run(provider.generate_activity_cards(observations, context_cards))
-    finally:
-        asyncio.run(provider.close())
+    
+    async def _run():
+        try:
+            return await provider.generate_activity_cards(observations, context_cards)
+        finally:
+            await provider.close()
+    
+    return asyncio.run(_run())
+
+
+def generate_daily_summary_sync(
+    cards: List[ActivityCard],
+    date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    thinking_mode: Optional[str] = None,
+    inspiration_cards: Optional[List] = None,
+    **kwargs
+) -> tuple[str, str]:
+    """同步版本的每日总结生成"""
+    provider = DayflowBackendProvider(**kwargs)
+    
+    async def _run():
+        try:
+            return await provider.generate_daily_summary(cards, date, model, thinking_mode, inspiration_cards)
+        finally:
+            await provider.close()
+    
+    return asyncio.run(_run())
+
+
+def generate_event_summary_sync(
+    cards: List[ActivityCard],
+    date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    thinking_mode: Optional[str] = None,
+    **kwargs
+) -> str:
+    """同步版本的事件总结生成"""
+    provider = DayflowBackendProvider(**kwargs)
+    
+    async def _run():
+        try:
+            return await provider.generate_event_summary(cards, date, model, thinking_mode)
+        finally:
+            await provider.close()
+    
+    return asyncio.run(_run())
+
+
+def generate_inspiration_summary_sync(
+    event_summary: str,
+    inspiration_cards: List,
+    date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    thinking_mode: Optional[str] = None,
+    **kwargs
+) -> str:
+    """同步版本的灵感总结生成（基于事件总结和灵感卡片）"""
+    provider = DayflowBackendProvider(**kwargs)
+    
+    async def _run():
+        try:
+            return await provider.generate_inspiration_summary(event_summary, inspiration_cards, date, model, thinking_mode)
+        finally:
+            await provider.close()
+    
+    return asyncio.run(_run())

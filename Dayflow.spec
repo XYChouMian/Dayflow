@@ -3,7 +3,13 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('database/schema.sql', 'database'), ('templates', 'templates')]
 binaries = []
-hiddenimports = ['PySide6.QtSvg', 'PySide6.QtSvgWidgets']
+hiddenimports = [
+    'httpx',
+    'cv2',
+    'jinja2',
+    'pynput.keyboard',
+    'pynput.mouse',
+]
 tmp_ret = collect_all('dxcam')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -48,5 +54,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Dayflow',
+    name='Dayflow_internal',
 )

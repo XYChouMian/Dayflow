@@ -89,8 +89,13 @@ class DashboardExporter:
     
     def _get_template_dir(self) -> Path:
         """获取模板目录路径"""
-        # 优先使用打包后的路径
+        # 优先使用打包后的路径（exe 同级目录的 Dayflow_internal/templates）
         if hasattr(config, 'APP_DIR'):
+            internal_path = config.APP_DIR / "Dayflow_internal" / "templates"
+            if internal_path.exists():
+                return internal_path
+            
+            # 兼容旧打包方式
             packed_path = config.APP_DIR / "templates"
             if packed_path.exists():
                 return packed_path

@@ -22,21 +22,9 @@ def build():
     # PyInstaller 参数
     args = [
         sys.executable, "-m", "PyInstaller",
-        "--name=Dayflow",
-        "--onedir",                    # 生成目录
-        "--windowed",                  # 无控制台窗口
+        "Dayflow.spec",
         "--clean",                     # 清理缓存
-        "--icon=assets/icon.ico",      # 应用图标
-        "--add-data=database/schema.sql;database",  # 包含数据库架构
-        "--add-data=templates;templates",           # 包含 HTML 模板
-        
-        # PySide6 6.8.1 通常只需要这些
-        "--hidden-import=PySide6.QtSvg",
-        "--hidden-import=PySide6.QtSvgWidgets", 
-        
-        "--collect-all=dxcam",         # 收集 dxcam 所有文件
         "--noconfirm",                 # 覆盖已有输出
-        "main.py"
     ]
     
     _safe_print("=" * 50)
@@ -48,11 +36,19 @@ def build():
     
     try:
         subprocess.run(args, check=True)
+        
+        # 执行后处理脚本，重组文件结构
+        _safe_print()
+        _safe_print("正在重组文件结构...")
+        subprocess.run([sys.executable, "post_build.py"], check=True)
+        
         _safe_print()
         _safe_print("=" * 50)
         _safe_print("  打包成功！")
-        _safe_print("  输出目录: dist/Dayflow/")
-        _safe_print("  运行: dist/Dayflow/Dayflow.exe")
+        _safe_print("  输出目录: dist/")
+        _safe_print("  可执行文件: dist/Dayflow.exe")
+        _safe_print("  依赖文件夹: dist/Dayflow_internal/")
+        _safe_print("  运行: dist/Dayflow.exe")
         _safe_print("=" * 50)
     except subprocess.CalledProcessError as e:
         _safe_print(f"打包失败: {e}")

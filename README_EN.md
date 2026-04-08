@@ -265,7 +265,6 @@ Dayflow/
 │   ├── window_tracker.py
 │   ├── llm_provider.py
 │   ├── analysis.py
-│   ├── email_service.py
 │   ├── updater.py
 │   ├── autostart.py
 │   ├── config_manager.py

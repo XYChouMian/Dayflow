@@ -305,7 +305,6 @@ Dayflow/
 │   ├── window_tracker.py   # 窗口追踪 (Windows API)
 │   ├── llm_provider.py     # AI API 交互
 │   ├── analysis.py         # 分析调度器
-│   ├── email_service.py    # 邮件日报 + 深度分析 + 智能补发
 │   ├── updater.py          # 版本检查 + 多源下载
 │   ├── autostart.py        # 开机自启动管理
 │   ├── config_manager.py   # 配置集中管理

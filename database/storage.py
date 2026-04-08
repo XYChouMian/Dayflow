@@ -14,7 +14,8 @@ import config
 from core.types import (
     VideoChunk, ChunkStatus,
     AnalysisBatch, BatchStatus,
-    ActivityCard, AppSite, Distraction
+    ActivityCard, AppSite, Distraction,
+    InspirationCard
 )
 from database.connection_pool import ConnectionPool, PoolExhaustedError
 
@@ -69,6 +70,81 @@ class StorageManager:
             if "window_records_path" not in columns:
                 conn.execute("ALTER TABLE chunks ADD COLUMN window_records_path TEXT")
                 logger.info("数据库迁移: 添加 chunks.window_records_path 字段")
+            
+            # 检查 inspirations 表是否需要迁移（从 tags_json 到 category + notes_json）
+            cursor = conn.execute("PRAGMA table_info(inspirations)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if "category" not in columns:
+                # 添加 category 字段
+                conn.execute("ALTER TABLE inspirations ADD COLUMN category TEXT DEFAULT '灵感'")
+                logger.info("数据库迁移: 添加 inspirations.category 字段")
+            
+            if "notes_json" not in columns:
+                # 添加 notes_json 字段
+                conn.execute("ALTER TABLE inspirations ADD COLUMN notes_json TEXT DEFAULT '[]'")
+                logger.info("数据库迁移: 添加 inspirations.notes_json 字段")
+                
+                # 如果旧数据有 tags_json 字段，将其数据迁移到 notes_json
+                if "tags_json" in columns:
+                    # 将 tags_json 的数据迁移到 notes_json
+                    conn.execute("UPDATE inspirations SET notes_json = tags_json WHERE tags_json IS NOT NULL AND notes_json = '[]'")
+                    logger.info("数据库迁移: 将 tags_json 数据迁移到 notes_json")
+            
+            # 检查 daily_summaries 表是否需要迁移（从 content 到 event_summary + inspiration_summary）
+            cursor = conn.execute("PRAGMA table_info(daily_summaries)")
+            columns_info = cursor.fetchall()
+            columns = [row[1] for row in columns_info]
+            columns_dict = {row[1]: row for row in columns_info}
+            
+            has_event_summary = "event_summary" in columns
+            has_inspiration_summary = "inspiration_summary" in columns
+            has_content = "content" in columns
+            
+            if not has_event_summary:
+                # 添加 event_summary 字段
+                conn.execute("ALTER TABLE daily_summaries ADD COLUMN event_summary TEXT")
+                logger.info("数据库迁移: 添加 daily_summaries.event_summary 字段")
+            
+            if not has_inspiration_summary:
+                # 添加 inspiration_summary 字段
+                conn.execute("ALTER TABLE daily_summaries ADD COLUMN inspiration_summary TEXT")
+                logger.info("数据库迁移: 添加 daily_summaries.inspiration_summary 字段")
+            
+            # 如果旧数据有 content 字段，将其数据迁移到 event_summary，然后删除 content 字段
+            if has_content:
+                # 检查 content 字段是否为 NOT NULL
+                content_notnull = columns_dict.get("content", {}).get("notnull", 0) == 1
+                
+                # 将 content 的数据迁移到 event_summary
+                conn.execute("UPDATE daily_summaries SET event_summary = content WHERE content IS NOT NULL")
+                logger.info("数据库迁移: 将 content 数据迁移到 event_summary")
+                
+                # 重建表以删除 content 字段（SQLite 不支持直接删除列）
+                conn.execute("""
+                    CREATE TABLE daily_summaries_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date TEXT NOT NULL UNIQUE,
+                        event_summary TEXT,
+                        inspiration_summary TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # 复制数据
+                conn.execute("""
+                    INSERT INTO daily_summaries_new (id, date, event_summary, inspiration_summary, created_at, updated_at)
+                    SELECT id, date, event_summary, inspiration_summary, created_at, updated_at FROM daily_summaries
+                """)
+                
+                # 删除旧表
+                conn.execute("DROP TABLE daily_summaries")
+                
+                # 重命名新表
+                conn.execute("ALTER TABLE daily_summaries_new RENAME TO daily_summaries")
+                
+                logger.info("数据库迁移: 已删除 daily_summaries.content 字段")
         except Exception as e:
             logger.debug(f"数据库迁移检查: {e}")
     
@@ -158,6 +234,19 @@ class StorageManager:
                 (ChunkStatus.PENDING.value, limit)
             )
             return [self._row_to_chunk(row) for row in cursor.fetchall()]
+    
+    def get_chunk_by_id(self, chunk_id: int) -> Optional[VideoChunk]:
+        """根据ID获取切片"""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM chunks 
+                WHERE id = ?
+                """,
+                (chunk_id,)
+            )
+            row = cursor.fetchone()
+            return self._row_to_chunk(row) if row else None
     
     def update_chunk_status(self, chunk_id: int, status: ChunkStatus, batch_id: Optional[int] = None):
         """更新切片状态"""
@@ -281,7 +370,7 @@ class StorageManager:
                     card.title,
                     card.summary,
                     card.start_time.isoformat() if card.start_time else None,
-                    card.end_time.isoformat() if card.end_time else None,
+                    card.end_time.isoformat() if card.end_time else None,  # 从属性获取
                     json.dumps([a.to_dict() for a in card.app_sites]),
                     json.dumps([d.to_dict() for d in card.distractions]),
                     card.productivity_score
@@ -305,6 +394,23 @@ class StorageManager:
             )
             return [self._row_to_card(row) for row in cursor.fetchall()]
     
+    def get_cards_before_time(self, time: datetime, limit: int = 10) -> List[ActivityCard]:
+        """获取指定时间之前的卡片（用作合并上下文）"""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM timeline_cards 
+                WHERE start_time < ?
+                ORDER BY start_time DESC
+                LIMIT ?
+                """,
+                (time.isoformat(), limit)
+            )
+            cards = [self._row_to_card(row) for row in cursor.fetchall()]
+            # 按开始时间升序排列，这样 context_cards[-1] 就是最近的一张卡片
+            cards.reverse()
+            return cards
+    
     def get_recent_cards(self, limit: int = 10) -> List[ActivityCard]:
         """获取最近的卡片（用作上下文）"""
         with self._get_connection() as conn:
@@ -320,20 +426,26 @@ class StorageManager:
     
     def _row_to_card(self, row: sqlite3.Row) -> ActivityCard:
         """将数据库行转换为 ActivityCard 对象"""
-        return ActivityCard(
+        card = ActivityCard(
             id=row["id"],
             category=row["category"],
             title=row["title"],
             summary=row["summary"],
             start_time=datetime.fromisoformat(row["start_time"]) if row["start_time"] else None,
-            end_time=datetime.fromisoformat(row["end_time"]) if row["end_time"] else None,
             app_sites=[AppSite.from_dict(a) for a in json.loads(row["app_sites_json"] or "[]")],
             distractions=[Distraction.from_dict(d) for d in json.loads(row["distractions_json"] or "[]")],
             productivity_score=row["productivity_score"]
         )
+        
+        # 将数据库中的end_time设置到_next_card_start_time字段
+        if row["end_time"]:
+            card._next_card_start_time = datetime.fromisoformat(row["end_time"])
+        
+        return card
     
     def update_card(self, card_id: int, category: str = None, title: str = None, 
-                    summary: str = None, productivity_score: float = None) -> bool:
+                    summary: str = None, productivity_score: float = None, 
+                    end_time: datetime = None) -> bool:
         """更新时间轴卡片"""
         try:
             with self._get_connection() as conn:
@@ -353,6 +465,9 @@ class StorageManager:
                 if productivity_score is not None:
                     updates.append("productivity_score = ?")
                     params.append(productivity_score)
+                if end_time is not None:
+                    updates.append("end_time = ?")
+                    params.append(end_time.isoformat())
                 
                 if not updates:
                     return False
@@ -376,6 +491,213 @@ class StorageManager:
         except Exception as e:
             logger.error(f"删除卡片失败 {card_id}: {e}")
             return False
+    
+    # ==================== Daily Summaries ====================
+    
+    def save_daily_summary(self, date: datetime, event_summary: Optional[str] = None, inspiration_summary: Optional[str] = None) -> int:
+        """
+        保存每日总结
+        
+        Args:
+            date: 日期
+            event_summary: 事件总结内容（可选）
+            inspiration_summary: 灵感总结内容（可选）
+            
+        Returns:
+            总结记录的 ID
+        """
+        date_str = date.strftime("%Y-%m-%d")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO daily_summaries (date, event_summary, inspiration_summary)
+                VALUES (?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    event_summary = COALESCE(?, event_summary),
+                    inspiration_summary = COALESCE(?, inspiration_summary),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (date_str, event_summary, inspiration_summary, event_summary, inspiration_summary)
+            )
+            
+            row_id = cursor.lastrowid
+            
+            if row_id == 0:
+                cursor = conn.execute("SELECT id FROM daily_summaries WHERE date = ?", (date_str,))
+                row = cursor.fetchone()
+                if row:
+                    row_id = row["id"]
+            
+            logger.info(f"已保存每日总结 {date_str}, ID: {row_id}")
+            return row_id
+    
+    def get_daily_summary(self, date: datetime) -> tuple[Optional[str], Optional[str]]:
+        """
+        获取指定日期的每日总结
+        
+        Args:
+            date: 日期
+            
+        Returns:
+            (event_summary, inspiration_summary) 元组，如果不存在则返回 (None, None)
+        """
+        date_str = date.strftime("%Y-%m-%d")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT event_summary, inspiration_summary FROM daily_summaries WHERE date = ?",
+                (date_str,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["event_summary"], row["inspiration_summary"]
+            return None, None
+    
+    def daily_summary_exists(self, date: datetime) -> bool:
+        """
+        检查指定日期是否已有每日总结
+        
+        Args:
+            date: 日期
+            
+        Returns:
+            如果存在返回 True，否则返回 False
+        """
+        date_str = date.strftime("%Y-%m-%d")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM daily_summaries WHERE date = ?",
+                (date_str,)
+            )
+            return cursor.fetchone() is not None
+    
+    # ==================== Inspirations ====================
+    
+    def save_inspiration(self, card: InspirationCard) -> int:
+        """
+        保存灵感卡片
+        
+        Args:
+            card: 灵感卡片对象
+            
+        Returns:
+            插入的记录ID
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO inspirations (content, timestamp, category, notes_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    card.content,
+                    card.timestamp.isoformat() if card.timestamp else datetime.now().isoformat(),
+                    card.category,
+                    json.dumps(card.notes)
+                )
+            )
+            return cursor.lastrowid
+    
+    def update_inspiration(self, card: InspirationCard):
+        """
+        更新灵感卡片
+        
+        Args:
+            card: 灵感卡片对象
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE inspirations
+                SET content = ?, timestamp = ?, category = ?, notes_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    card.content,
+                    card.timestamp.isoformat() if card.timestamp else datetime.now().isoformat(),
+                    card.category,
+                    json.dumps(card.notes),
+                    card.id
+                )
+            )
+    
+    def delete_inspiration(self, inspiration_id: int):
+        """
+        删除灵感卡片
+        
+        Args:
+            inspiration_id: 灵感卡片ID
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM inspirations WHERE id = ?",
+                (inspiration_id,)
+            )
+    
+    def get_inspirations_by_date(self, date: datetime) -> List[InspirationCard]:
+        """
+        获取指定日期的灵感卡片列表
+        
+        Args:
+            date: 日期
+            
+        Returns:
+            灵感卡片列表
+        """
+        start_of_day = datetime(date.year, date.month, date.day, 0, 0, 0)
+        end_of_day = datetime(date.year, date.month, date.day, 23, 59, 59)
+        
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT id, content, timestamp, category, notes_json
+                FROM inspirations
+                WHERE timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp DESC
+                """,
+                (start_of_day.isoformat(), end_of_day.isoformat())
+            )
+            
+            cards = []
+            for row in cursor.fetchall():
+                card = InspirationCard(
+                    id=row["id"],
+                    content=row["content"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    category=row["category"],
+                    notes=json.loads(row["notes_json"])
+                )
+                cards.append(card)
+            
+            return cards
+    
+    def get_all_inspirations(self) -> List[InspirationCard]:
+        """
+        获取所有灵感卡片
+        
+        Returns:
+            所有灵感卡片列表（按时间倒序）
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT id, content, timestamp, category, notes_json
+                FROM inspirations
+                ORDER BY timestamp DESC
+                """
+            )
+            
+            cards = []
+            for row in cursor.fetchall():
+                card = InspirationCard(
+                    id=row["id"],
+                    content=row["content"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    category=row["category"],
+                    notes=json.loads(row["notes_json"])
+                )
+                cards.append(card)
+            
+            return cards
     
     # ==================== Settings ====================
     

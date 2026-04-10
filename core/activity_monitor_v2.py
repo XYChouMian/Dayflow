@@ -38,6 +38,17 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+def format_rest_duration(minutes: float) -> str:
+    if minutes >= 60:
+        hours = int(minutes // 60)
+        remaining_minutes = int(minutes % 60)//1
+        if remaining_minutes > 0:
+            return f"{hours}小时{remaining_minutes}分钟"
+        else:
+            return f"{hours}小时"
+    else:
+        return f"{minutes:.1f}分钟"
+
 
 class SmartActivityMonitor:
     """
@@ -784,7 +795,7 @@ class SmartAutoPauseRecorder:
                             rest_card = ActivityCard(
                                 category="休息",
                                 title="休息时间",
-                                summary=f"用户休息了 {merged_duration:.1f} 分钟",
+                                summary=f"用户休息了 {format_rest_duration(merged_duration)}",
                                 start_time=merged_start_time,
                                 app_sites=[],
                                 distractions=[],
@@ -811,7 +822,7 @@ class SmartAutoPauseRecorder:
                             rest_card = ActivityCard(
                                 category="休息",
                                 title="休息时间",
-                                summary=f"用户休息了 {rest_duration:.1f} 分钟",
+                                summary=f"用户休息了 {format_rest_duration(rest_duration)}",
                                 start_time=self._rest_start_time,
                                 app_sites=[],
                                 distractions=[],
@@ -830,7 +841,7 @@ class SmartAutoPauseRecorder:
                         rest_card = ActivityCard(
                             category="休息",
                             title="休息时间",
-                            summary=f"用户休息了 {rest_duration:.1f} 分钟",
+                            summary=f"用户休息了 {format_rest_duration(rest_duration)}",
                             start_time=self._rest_start_time,
                             app_sites=[],
                             distractions=[],
@@ -977,7 +988,7 @@ class SmartAutoPauseRecorder:
                         rest_card = ActivityCard(
                             category="休息",
                             title="休息时间",
-                            summary=f"用户休息了 {merged_duration:.1f} 分钟",
+                            summary=f"用户休息了 {format_rest_duration(merged_duration)}",
                             start_time=merged_start_time,
                             app_sites=[],
                             distractions=[],
@@ -1004,7 +1015,7 @@ class SmartAutoPauseRecorder:
                         rest_card = ActivityCard(
                             category="休息",
                             title="休息时间",
-                            summary=f"用户休息了 {rest_duration:.1f} 分钟",
+                            summary=f"用户休息了 {format_rest_duration(rest_duration)}",
                             start_time=self._rest_start_time,
                             app_sites=[],
                             distractions=[],
@@ -1023,7 +1034,7 @@ class SmartAutoPauseRecorder:
                     rest_card = ActivityCard(
                         category="休息",
                         title="休息时间",
-                        summary=f"用户休息了 {rest_duration:.1f} 分钟",
+                        summary=f"用户休息了 {format_rest_duration(rest_duration)}",
                         start_time=self._rest_start_time,
                         app_sites=[],
                         distractions=[],

@@ -179,15 +179,39 @@ class DayflowBackendProvider:
         thinking_mode: Optional[str] = None,
         text_model: Optional[str] = None,
     ):
-        self.api_base_url = (api_base_url or config.API_BASE_URL).rstrip("/")
-        self.api_key = api_key or config.API_KEY
-        self.model = model or config.API_MODEL
-        self.text_model = text_model or config.DAILY_SUMMARY_MODEL
-        self.timeout = timeout if timeout is not None else config.API_TIMEOUT
-        self.thinking_mode = thinking_mode or config.VISUAL_THINKING_MODE
+        self._api_base_url = api_base_url
+        self._api_key = api_key
+        self._model = model
+        self._text_model = text_model
+        self._timeout = timeout
+        self._thinking_mode = thinking_mode
         
         self._client: Optional[httpx.AsyncClient] = None
         self._client_loop_id: Optional[int] = None
+    
+    @property
+    def api_base_url(self) -> str:
+        return (self._api_base_url or config.API_BASE_URL).rstrip("/")
+    
+    @property
+    def api_key(self) -> str:
+        return self._api_key or config.API_KEY
+    
+    @property
+    def model(self) -> str:
+        return self._model or config.API_MODEL
+    
+    @property
+    def text_model(self) -> str:
+        return self._text_model or config.DAILY_SUMMARY_MODEL
+    
+    @property
+    def timeout(self) -> float:
+        return self._timeout if self._timeout is not None else config.API_TIMEOUT
+    
+    @property
+    def thinking_mode(self) -> str:
+        return self._thinking_mode or config.VISUAL_THINKING_MODE
     
     @property
     def headers(self) -> dict:
@@ -636,25 +660,60 @@ class DayflowBackendProvider:
             for card in context_cards[-3:]:
                 obs_text += f"- {card.category}: {card.title}\n"
         
-        if prompt:
-            obs_text += f"\n{prompt}"
+        # 计算总时长
+        total_duration = max((obs.end_ts for obs in observations), default=0)
         
-        messages = [
-            {"role": "system", "content": GENERATE_CARDS_SYSTEM_PROMPT},
-            {"role": "user", "content": obs_text}
-        ]
-        
-        try:
-            logger.info(f"开始生成活动卡片: {len(observations)} 条观察记录")
-            response_text = await self._chat_completion(messages, model=self.text_model)
+        # 重试机制：最多重试2次（总共3次机会）
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            # 添加额外提示词（如果是重试，强调时间连续性）
+            if attempt > 0:
+                obs_text += f"\n\n【重要提示】上次生成的卡片未通过时间连续性验证！\n"
+                obs_text += "请务必确保满足以下规则：\n"
+                obs_text += "1. 每张卡片的结束时间必须晚于开始时间\n"
+                obs_text += "2. 每张卡片的结束时间必须早于或等于下一张卡片的开始时间\n"
+                obs_text += "3. 严禁出现时间重叠！\n"
+                obs_text += "4. 卡片的开始时间由系统根据视频录制时间点自动设置，你只需要返回结束时间（end_ts）\n"
+                obs_text += f"5. 总观察时长为 {total_duration:.0f} 秒，请合理分配时间范围\n"
             
-            total_duration = max((obs.end_ts for obs in observations), default=0)
-            cards = self._parse_cards_from_text(response_text, start_time, total_duration)
-            logger.info(f"活动卡片生成完成: {len(cards)} 张卡片")
-            return cards
-        except Exception as e:
-            logger.error(f"卡片生成失败: {e}")
-            return []
+            if prompt:
+                obs_text += f"\n{prompt}"
+            
+            messages = [
+                {"role": "system", "content": GENERATE_CARDS_SYSTEM_PROMPT},
+                {"role": "user", "content": obs_text}
+            ]
+            
+            try:
+                logger.info(f"开始生成活动卡片: {len(observations)} 条观察记录 (尝试 {attempt + 1}/{max_retries + 1})")
+                response_text = await self._chat_completion(messages, model=self.text_model)
+                
+                cards = self._parse_cards_from_text(response_text, start_time, total_duration)
+                
+                # 验证卡片时间连续性
+                is_valid, error_msg = self._validate_card_continuity(cards)
+                
+                if is_valid:
+                    logger.info(f"活动卡片生成完成并通过验证: {len(cards)} 张卡片")
+                    return cards
+                else:
+                    logger.warning(f"活动卡片时间连续性验证失败 (尝试 {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    
+                    if attempt < max_retries:
+                        logger.info("将重新提交给AI分析，强调时间连续性")
+                        # 移除之前添加的提示词，准备下一次重试
+                        obs_text = obs_text.split("【重要提示】")[0] if "【重要提示】" in obs_text else obs_text
+                    else:
+                        logger.error(f"已达到最大重试次数 ({max_retries + 1})，验证仍然失败: {error_msg}")
+                        logger.warning("返回验证失败的卡片，后续在analysis.py中会进行进一步处理")
+                        return cards
+                        
+            except Exception as e:
+                logger.error(f"卡片生成失败 (尝试 {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt == max_retries:
+                    return []
+        
+        return []
     
     def _parse_observations_from_text(self, text: str, duration: float) -> List[Observation]:
         """从文本响应中解析观察记录"""
@@ -759,6 +818,44 @@ class DayflowBackendProvider:
             logger.warning(f"卡片 JSON 解析失败: {e}")
         
         return cards
+    
+    def _validate_card_continuity(self, cards: List[ActivityCard]) -> tuple[bool, str]:
+        """
+        验证卡片时间连续性
+        
+        验证规则：
+        1. 每张卡片的结束时间必须晚于开始时间
+        2. 每张卡片的结束时间必须早于或等于下一张卡片的开始时间
+        
+        Returns:
+            (is_valid, error_message): 验证结果和错误信息
+        """
+        if not cards:
+            return True, ""
+        
+        for i, card in enumerate(cards):
+            # 检查卡片的结束时间是否设置
+            if card._next_card_start_time is None:
+                return False, f"卡片 {i+1} 的结束时间未设置"
+            
+            # 检查卡片的开始时间是否设置
+            if card.start_time is None:
+                return False, f"卡片 {i+1} 的开始时间未设置"
+            
+            # 检查卡片结束时间是否晚于开始时间
+            if card._next_card_start_time <= card.start_time:
+                return False, f"卡片 {i+1} 的结束时间 ({card._next_card_start_time}) 不晚于开始时间 ({card.start_time})"
+            
+            # 检查与下一张卡片的时间连续性
+            if i < len(cards) - 1:
+                next_card = cards[i + 1]
+                if next_card.start_time is None:
+                    return False, f"卡片 {i+2} 的开始时间未设置"
+                
+                if card._next_card_start_time > next_card.start_time:
+                    return False, f"卡片 {i+1} 的结束时间 ({card._next_card_start_time}) 晚于卡片 {i+2} 的开始时间 ({next_card.start_time})，存在时间重叠"
+        
+        return True, ""
     
     async def health_check(self) -> bool:
         """检查 API 连接状态"""
@@ -1040,6 +1137,95 @@ class DayflowBackendProvider:
         
         return inspiration_summary
     
+    async def generate_weekly_summary(
+        self,
+        daily_summaries: List[Dict],
+        missing_days: List[datetime],
+        end_date: Optional[datetime] = None,
+        model: Optional[str] = None
+    ) -> str:
+        """
+        生成每周总结（基于过去7天的每日总结）
+        
+        Args:
+            daily_summaries: 每日总结列表，每个元素包含date, event_summary, inspiration_summary
+            missing_days: 缺失每日总结的日期列表
+            end_date: 结束日期（默认为当前日期）
+            model: 模型名称（可选，不传则使用默认的每日总结模型）
+            
+        Returns:
+            每周总结内容
+        """
+        # 使用配置的每日总结模型，如果未指定
+        summary_model = model or config.DAILY_SUMMARY_MODEL
+        
+        if not daily_summaries:
+            return "过去7天没有任何每日总结记录，无法生成每周总结。"
+        
+        # 构建每周总结文本
+        end_date_str = end_date.strftime('%Y-%m-%d') if end_date else datetime.now().strftime('%Y-%m-%d')
+        start_date = end_date - timedelta(days=6) if end_date else datetime.now() - timedelta(days=6)
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        weekly_text = f"每周总结报告\n"
+        weekly_text += f"时间范围: {start_date_str} 至 {end_date_str}\n"
+        weekly_text += f"共 {len(daily_summaries)} 天有记录，{len(missing_days)} 天无记录\n\n"
+        
+        # 添加每日总结内容
+        weekly_text += "每日总结详情：\n"
+        for summary in daily_summaries:
+            date_str = summary['date'].strftime('%Y-%m-%d')
+            weekly_text += f"\n【{date_str}】\n"
+            weekly_text += f"事件总结：{summary['event_summary']}\n"
+            if summary['inspiration_summary'] and summary['inspiration_summary'] != '暂无灵感总结':
+                weekly_text += f"灵感总结：{summary['inspiration_summary']}\n"
+            weekly_text += "\n"
+        
+        # 添加缺失日期信息
+        if missing_days:
+            missing_dates_str = ", ".join([d.strftime('%Y-%m-%d') for d in missing_days])
+            weekly_text += f"\n缺失记录的日期：{missing_dates_str}\n"
+        
+        # 构建提示词
+        system_prompt = """你是一位专业的时间管理顾问，擅长分析用户的每日活动总结并生成有价值的每周总结报告。
+
+你的任务是：
+1. 分析用户过去7天的每日活动总结
+2. 识别主要活动模式和趋势
+3. 发现效率提升或下降的原因
+4. 提供具体的改进建议
+5. 总结本周的亮点和需要改进的地方
+
+输出要求：
+- 使用清晰的markdown格式
+- 包含数据洞察和趋势分析
+- 提供具体可行的改进建议
+- 语言简洁明了，重点突出
+- 使用emoji增加可读性
+
+报告结构：
+1. 📊 本周概览
+2. 📈 趋势分析
+3. 🎯 亮点发现
+4. ⚠️ 需要关注的问题
+5. 💡 改进建议
+6. 🚀 下周计划建议"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": weekly_text}
+        ]
+        
+        try:
+            logger.info(f"开始生成每周总结: {len(daily_summaries)} 天有记录，{len(missing_days)} 天缺失，使用模型: {summary_model}")
+            weekly_summary = await self._chat_completion(messages, model=summary_model)
+            logger.info(f"每周总结生成完成，字数: {len(weekly_summary)}")
+        except Exception as e:
+            logger.error(f"每周总结生成失败: {e}")
+            weekly_summary = f"每周总结生成失败: {str(e)}"
+        
+        return weekly_summary
+    
     async def test_connection(self, test_image: bool = True) -> tuple[bool, str]:
         """
         测试 API 连接（包含图片测试）
@@ -1210,3 +1396,246 @@ def generate_inspiration_summary_sync(
             await provider.close()
     
     return asyncio.run(_run())
+
+
+def generate_weekly_summary_sync(
+    daily_summaries: List[Dict],
+    missing_days: List[datetime],
+    end_date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    **kwargs
+) -> str:
+    """同步版本的每周总结生成（基于过去7天的每日总结）
+    
+    Args:
+        daily_summaries: 每日总结列表，每个元素包含date, event_summary, inspiration_summary
+        missing_days: 缺失每日总结的日期列表
+        end_date: 结束日期（默认为当前日期）
+        model: 模型名称（可选，不传则使用默认的每日总结模型）
+        
+    Returns:
+        每周总结内容
+    """
+    provider = DayflowBackendProvider(**kwargs)
+    
+    async def _run():
+        try:
+            return await provider.generate_weekly_summary(daily_summaries, missing_days, end_date, model)
+        finally:
+            await provider.close()
+    
+    return asyncio.run(_run())
+
+
+async def generate_weekly_event_summary_async(
+    daily_summaries: List[Dict],
+    missing_days: List[datetime],
+    end_date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    **kwargs
+) -> str:
+    """
+    生成每周事件总结（基于过去7天的每日事件总结）
+    
+    Args:
+        daily_summaries: 每日总结列表，每个元素包含date, event_summary, inspiration_summary
+        missing_days: 缺失每日总结的日期列表
+        end_date: 结束日期（默认为当前日期）
+        model: 模型名称（可选）
+        
+    Returns:
+        每周事件总结内容
+    """
+    provider = DayflowBackendProvider(**kwargs)
+    
+    try:
+        summary_model = model or config.DAILY_SUMMARY_MODEL
+        
+        if not daily_summaries:
+            return "过去7天没有任何每日事件总结记录，无法生成每周事件总结。"
+        
+        end_date_str = end_date.strftime('%Y-%m-%d') if end_date else datetime.now().strftime('%Y-%m-%d')
+        start_date = end_date - timedelta(days=6) if end_date else datetime.now() - timedelta(days=6)
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        weekly_text = f"每周事件总结报告\n"
+        weekly_text += f"时间范围: {start_date_str} 至 {end_date_str}\n"
+        weekly_text += f"共 {len(daily_summaries)} 天有记录，{len(missing_days)} 天无记录\n\n"
+        
+        weekly_text += "每日事件总结详情：\n"
+        for summary in daily_summaries:
+            date_str = summary['date'].strftime('%Y-%m-%d')
+            weekly_text += f"\n【{date_str}】\n"
+            if summary['event_summary']:
+                weekly_text += f"事件总结：{summary['event_summary']}\n"
+            weekly_text += "\n"
+        
+        if missing_days:
+            missing_dates_str = ", ".join([d.strftime('%Y-%m-%d') for d in missing_days])
+            weekly_text += f"\n缺失记录的日期：{missing_dates_str}\n"
+        
+        system_prompt = """你是一位专业的时间管理顾问，擅长分析用户的每日活动事件总结并生成有价值的每周事件总结报告。
+
+你的任务是：
+1. 分析用户过去7天的每日活动事件总结
+2. 识别主要活动模式和趋势
+3. 发现效率提升或下降的原因
+4. 提供具体的改进建议
+5. 总结本周的亮点和需要改进的地方
+
+输出要求：
+- 使用清晰的markdown格式
+- 包含数据洞察和趋势分析
+- 提供具体可行的改进建议
+- 语言简洁明了，重点突出
+- 使用emoji增加可读性
+
+报告结构：
+1. 📊 本周活动概览
+2. 📈 工作效率趋势分析
+3. 🎯 主要活动发现
+4. ⚠️ 需要关注的问题
+5. 💡 改进建议
+6. 🚀 下周工作计划建议"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": weekly_text}
+        ]
+        
+        logger.info(f"开始生成每周事件总结: {len(daily_summaries)} 天有记录，{len(missing_days)} 天缺失，使用模型: {summary_model}")
+        weekly_summary = await provider._chat_completion(messages, model=summary_model)
+        logger.info(f"每周事件总结生成完成，字数: {len(weekly_summary)}")
+        
+        return weekly_summary
+    finally:
+        await provider.close()
+
+
+def generate_weekly_event_summary_sync(
+    daily_summaries: List[Dict],
+    missing_days: List[datetime],
+    end_date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    **kwargs
+) -> str:
+    """同步版本的每周事件总结生成
+    
+    Args:
+        daily_summaries: 每日总结列表，每个元素包含date, event_summary, inspiration_summary
+        missing_days: 缺失每日总结的日期列表
+        end_date: 结束日期（默认为当前日期）
+        model: 模型名称（可选）
+        
+    Returns:
+        每周事件总结内容
+    """
+    return asyncio.run(generate_weekly_event_summary_async(daily_summaries, missing_days, end_date, model, **kwargs))
+
+
+async def generate_weekly_inspiration_summary_async(
+    daily_summaries: List[Dict],
+    missing_days: List[datetime],
+    end_date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    **kwargs
+) -> str:
+    """
+    生成每周灵感总结（基于过去7天的每日灵感总结）
+    
+    Args:
+        daily_summaries: 每日总结列表，每个元素包含date, event_summary, inspiration_summary
+        missing_days: 缺失每日总结的日期列表
+        end_date: 结束日期（默认为当前日期）
+        model: 模型名称（可选）
+        
+    Returns:
+        每周灵感总结内容
+    """
+    provider = DayflowBackendProvider(**kwargs)
+    
+    try:
+        summary_model = model or config.DAILY_SUMMARY_MODEL
+        
+        inspiration_summaries = [s for s in daily_summaries if s.get('inspiration_summary')]
+        
+        if not inspiration_summaries:
+            return "过去7天没有任何每日灵感总结记录，无法生成每周灵感总结。"
+        
+        end_date_str = end_date.strftime('%Y-%m-%d') if end_date else datetime.now().strftime('%Y-%m-%d')
+        start_date = end_date - timedelta(days=6) if end_date else datetime.now() - timedelta(days=6)
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        weekly_text = f"每周灵感总结报告\n"
+        weekly_text += f"时间范围: {start_date_str} 至 {end_date_str}\n"
+        weekly_text += f"共 {len(inspiration_summaries)} 天有灵感记录，{len(missing_days)} 天无记录\n\n"
+        
+        weekly_text += "每日灵感总结详情：\n"
+        for summary in inspiration_summaries:
+            date_str = summary['date'].strftime('%Y-%m-%d')
+            weekly_text += f"\n【{date_str}】\n"
+            if summary['inspiration_summary']:
+                weekly_text += f"灵感总结：{summary['inspiration_summary']}\n"
+            weekly_text += "\n"
+        
+        if missing_days:
+            missing_dates_str = ", ".join([d.strftime('%Y-%m-%d') for d in missing_days])
+            weekly_text += f"\n缺失记录的日期：{missing_dates_str}\n"
+        
+        system_prompt = """你是一位富有洞察力的创意顾问，擅长分析用户的每日灵感总结并生成有价值的每周灵感总结报告。
+
+你的任务是：
+1. 分析用户过去7天的每日灵感总结和思考
+2. 发现思维模式和创意趋势
+3. 识别有价值的创新点和突破性想法
+4. 提供深度思考的延伸建议
+5. 总结本周的灵感亮点和潜在机会
+
+输出要求：
+- 使用清晰的markdown格式
+- 注重思维深度和创意价值
+- 提供启发性思考和延伸建议
+- 语言富有启发性和洞察力
+- 使用emoji增加可读性
+
+报告结构：
+1. ✨ 本周灵感概览
+2. 💭 思维模式分析
+3. 🌟 亮点灵感发现
+4. 🔍 深度思考延伸
+5. 💡 创意建议
+6. 🚀 下周思考方向"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": weekly_text}
+        ]
+        
+        logger.info(f"开始生成每周灵感总结: {len(inspiration_summaries)} 天有记录，{len(missing_days)} 天缺失，使用模型: {summary_model}")
+        weekly_summary = await provider._chat_completion(messages, model=summary_model)
+        logger.info(f"每周灵感总结生成完成，字数: {len(weekly_summary)}")
+        
+        return weekly_summary
+    finally:
+        await provider.close()
+
+
+def generate_weekly_inspiration_summary_sync(
+    daily_summaries: List[Dict],
+    missing_days: List[datetime],
+    end_date: Optional[datetime] = None,
+    model: Optional[str] = None,
+    **kwargs
+) -> str:
+    """同步版本的每周灵感总结生成
+    
+    Args:
+        daily_summaries: 每日总结列表，每个元素包含date, event_summary, inspiration_summary
+        missing_days: 缺失每日总结的日期列表
+        end_date: 结束日期（默认为当前日期）
+        model: 模型名称（可选）
+        
+    Returns:
+        每周灵感总结内容
+    """
+    return asyncio.run(generate_weekly_inspiration_summary_async(daily_summaries, missing_days, end_date, model, **kwargs))

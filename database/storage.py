@@ -570,6 +570,93 @@ class StorageManager:
             )
             return cursor.fetchone() is not None
     
+    # ==================== Weekly Summaries ====================
+    
+    def save_weekly_summary(self, week_start: datetime, week_end: datetime, event_summary: Optional[str] = None, inspiration_summary: Optional[str] = None) -> int:
+        """
+        保存周总结
+        
+        Args:
+            week_start: 周开始日期
+            week_end: 周结束日期
+            event_summary: 周事件总结内容（可选）
+            inspiration_summary: 周灵感总结内容（可选）
+            
+        Returns:
+            总结记录的 ID
+        """
+        week_start_str = week_start.strftime("%Y-%m-%d")
+        week_end_str = week_end.strftime("%Y-%m-%d")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO weekly_summaries (week_start, week_end, event_summary, inspiration_summary)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(week_start, week_end) DO UPDATE SET
+                    event_summary = COALESCE(?, event_summary),
+                    inspiration_summary = COALESCE(?, inspiration_summary),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (week_start_str, week_end_str, event_summary, inspiration_summary, event_summary, inspiration_summary)
+            )
+            
+            row_id = cursor.lastrowid
+            
+            if row_id == 0:
+                cursor = conn.execute(
+                    "SELECT id FROM weekly_summaries WHERE week_start = ? AND week_end = ?",
+                    (week_start_str, week_end_str)
+                )
+                row = cursor.fetchone()
+                if row:
+                    row_id = row["id"]
+            
+            logger.info(f"已保存周总结 {week_start_str} 至 {week_end_str}, ID: {row_id}")
+            return row_id
+    
+    def get_weekly_summary(self, week_start: datetime, week_end: datetime) -> tuple[Optional[str], Optional[str]]:
+        """
+        获取指定周的周总结
+        
+        Args:
+            week_start: 周开始日期
+            week_end: 周结束日期
+            
+        Returns:
+            (event_summary, inspiration_summary) 元组，如果不存在则返回 (None, None)
+        """
+        week_start_str = week_start.strftime("%Y-%m-%d")
+        week_end_str = week_end.strftime("%Y-%m-%d")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT event_summary, inspiration_summary FROM weekly_summaries WHERE week_start = ? AND week_end = ?",
+                (week_start_str, week_end_str)
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["event_summary"], row["inspiration_summary"]
+            return None, None
+    
+    def weekly_summary_exists(self, week_start: datetime, week_end: datetime) -> bool:
+        """
+        检查指定周是否已有周总结
+        
+        Args:
+            week_start: 周开始日期
+            week_end: 周结束日期
+            
+        Returns:
+            如果存在返回 True，否则返回 False
+        """
+        week_start_str = week_start.strftime("%Y-%m-%d")
+        week_end_str = week_end.strftime("%Y-%m-%d")
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM weekly_summaries WHERE week_start = ? AND week_end = ?",
+                (week_start_str, week_end_str)
+            )
+            return cursor.fetchone() is not None
+    
     # ==================== Inspirations ====================
     
     def save_inspiration(self, card: InspirationCard) -> int:

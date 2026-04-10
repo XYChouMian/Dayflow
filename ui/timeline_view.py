@@ -587,8 +587,9 @@ class ActivityCardWidget(QFrame):
         """)
         top_layout.addWidget(category_label)
         
-        # 深度工作徽章 (duration >= 60 分钟)
-        if self.card.duration_minutes >= 60:
+        # 深度工作徽章 (duration >= 60 分钟，且类别为工作相关)
+        work_categories = ["工作", "学习", "编程", "会议"]
+        if self.card.duration_minutes >= 60 and self.card.category in work_categories:
             deep_work_badge = QLabel("🔥 深度工作")
             deep_work_badge._is_deep_work_badge = True
             deep_work_badge.setStyleSheet(f"""

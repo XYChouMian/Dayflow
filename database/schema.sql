@@ -72,6 +72,19 @@ CREATE INDEX IF NOT EXISTS idx_cards_start_time ON timeline_cards(start_time);
 CREATE INDEX IF NOT EXISTS idx_cards_category ON timeline_cards(category);
 CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date);
 
+-- 周总结表
+CREATE TABLE IF NOT EXISTS weekly_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    week_start TEXT NOT NULL,  -- 周开始日期 (YYYY-MM-DD)
+    week_end TEXT NOT NULL,  -- 周结束日期 (YYYY-MM-DD)
+    event_summary TEXT,  -- 周事件总结内容
+    inspiration_summary TEXT,  -- 周灵感总结内容
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(week_start, week_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weekly_summaries_week ON weekly_summaries(week_start, week_end);
 
 -- 灵感卡片表
 CREATE TABLE IF NOT EXISTS inspirations (

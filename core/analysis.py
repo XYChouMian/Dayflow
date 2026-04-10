@@ -37,12 +37,7 @@ class AnalysisScheduler:
         scan_interval_seconds: int = None
     ):
         self.storage = storage or StorageManager()
-        if provider:
-            self.provider = provider
-        else:
-            thinking_mode = self.storage.get_setting("visual_thinking_mode", config.VISUAL_THINKING_MODE)
-            text_model = self.storage.get_setting("daily_summary_model", config.DAILY_SUMMARY_MODEL)
-            self.provider = DayflowBackendProvider(thinking_mode=thinking_mode, text_model=text_model)
+        self.provider = provider or DayflowBackendProvider()
         self.batch_chunk_count = batch_chunk_count or config.BATCH_CHUNK_COUNT
         self.scan_interval = scan_interval_seconds or config.ANALYSIS_INTERVAL_SECONDS
         
@@ -318,6 +313,9 @@ class AnalysisScheduler:
                 start_time=batch.start_time
             )
             
+            # 验证并修复卡片时间连续性（AI已经重试过，但这里再做一次最终检查）
+            self._validate_and_fix_card_continuity(cards)
+            
             # 保存卡片（处理合并逻辑）
             # context_cards 是升序排列的，所以最后一张卡片就是最近的一张
             previous_card = context_cards[-1] if context_cards else None
@@ -462,6 +460,76 @@ class AnalysisScheduler:
                     self.storage.update_chunk_status(chunk.id, ChunkStatus.FAILED)
             
             raise
+    
+    def _validate_and_fix_card_continuity(self, cards: List[ActivityCard]) -> None:
+        """
+        验证并修复卡片时间连续性
+        
+        验证规则：
+        1. 每张卡片的结束时间必须晚于开始时间
+        2. 每张卡片的结束时间必须早于或等于下一张卡片的开始时间
+        
+        修复规则：
+        - 如果卡片结束时间 > 下一张卡片的开始时间，将结束时间修正为下一张卡片的开始时间
+        - 如果卡片结束时间 <= 开始时间，删除该卡片（记录警告）
+        
+        Args:
+            cards: 待验证和修复的卡片列表（会被原地修改）
+        """
+        if not cards:
+            return
+        
+        cards_to_remove = []
+        
+        for i, card in enumerate(cards):
+            # 检查卡片的结束时间是否设置
+            if card._next_card_start_time is None:
+                logger.warning(f"卡片 {i+1} 的结束时间未设置，跳过验证")
+                continue
+            
+            # 检查卡片的开始时间是否设置
+            if card.start_time is None:
+                logger.warning(f"卡片 {i+1} 的开始时间未设置，跳过验证")
+                continue
+            
+            # 检查卡片结束时间是否晚于开始时间
+            if card._next_card_start_time <= card.start_time:
+                logger.warning(
+                    f"卡片 {i+1} 的结束时间 ({card._next_card_start_time}) 不晚于开始时间 ({card.start_time})，"
+                    f"标记为删除"
+                )
+                cards_to_remove.append(card)
+                continue
+            
+            # 检查与下一张卡片的时间连续性
+            if i < len(cards) - 1:
+                next_card = cards[i + 1]
+                if next_card.start_time is None:
+                    logger.warning(f"卡片 {i+2} 的开始时间未设置，跳过连续性检查")
+                    continue
+                
+                if card._next_card_start_time > next_card.start_time:
+                    # 时间重叠，修正结束时间为下一张卡片的开始时间
+                    logger.warning(
+                        f"卡片 {i+1} 的结束时间 ({card._next_card_start_time}) "
+                        f"晚于卡片 {i+2} 的开始时间 ({next_card.start_time})，存在时间重叠，修正结束时间"
+                    )
+                    
+                    old_end_time = card._next_card_start_time
+                    card._next_card_start_time = next_card.start_time
+                    
+                    # 计算修正后的持续时间
+                    corrected_duration = (card._next_card_start_time - card.start_time).total_seconds() / 60
+                    logger.info(
+                        f"已修正卡片 {i+1} ({card.title}) 的结束时间: "
+                        f"{old_end_time} -> {card._next_card_start_time} "
+                        f"(持续时间: {corrected_duration:.1f}分钟)"
+                    )
+        
+        # 移除需要删除的卡片
+        for card in cards_to_remove:
+            if card in cards:
+                cards.remove(card)
     
     def analyze_remaining_chunks(self):
         """强制分析所有未分析的切片（录制停止时调用）

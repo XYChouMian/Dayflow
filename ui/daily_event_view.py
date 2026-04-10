@@ -14,7 +14,7 @@ if sys.platform == 'win32':
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
     QFrame, QSizePolicy, QPushButton, QTextBrowser, QStackedWidget,
-    QSplitter, QCalendarWidget, QDialog, QTableView, QToolButton
+    QSplitter, QCalendarWidget, QDialog, QTableView, QToolButton, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QDate
 from PySide6.QtGui import QPalette, QColor, QIcon, QFont
@@ -401,13 +401,20 @@ class DailySummaryView(QWidget):
         layout.setSpacing(0)
         
         # 总结内容显示区域
-        content_layout = QHBoxLayout()
+        content_layout = QVBoxLayout()
         content_layout.setContentsMargins(24, 0, 24, 24)
         
-        # 左右分栏
-        summary_splitter = QSplitter(Qt.Horizontal)
+        # 每日总结区域
+        daily_summary_container = QWidget()
+        daily_summary_layout = QVBoxLayout(daily_summary_container)
+        daily_summary_layout.setContentsMargins(0, 0, 0, 0)
+        daily_summary_layout.setSpacing(10)
         
-        # 左侧：事件总结
+        # 每日总结内容行
+        daily_content_row = QHBoxLayout()
+        daily_content_row.setSpacing(10)
+        
+        # 事件总结
         event_summary_container = QWidget()
         event_summary_layout = QVBoxLayout(event_summary_container)
         event_summary_layout.setContentsMargins(0, 0, 0, 0)
@@ -420,10 +427,10 @@ class DailySummaryView(QWidget):
         
         self.event_summary_text = QTextBrowser()
         self.event_summary_text.setPlaceholderText("点击\"开始总结\"按钮，系统将为您生成每日活动总结...")
-        self.event_summary_text.setMinimumHeight(400)
+        self.event_summary_text.setMinimumHeight(350)
         event_summary_layout.addWidget(self.event_summary_text)
         
-        # 右侧：灵感总结
+        # 灵感总结
         inspiration_summary_container = QWidget()
         inspiration_summary_layout = QVBoxLayout(inspiration_summary_container)
         inspiration_summary_layout.setContentsMargins(0, 0, 0, 0)
@@ -437,15 +444,14 @@ class DailySummaryView(QWidget):
         
         self.inspiration_summary_text = QTextBrowser()
         self.inspiration_summary_text.setPlaceholderText("点击\"开始总结\"按钮，系统将为您生成灵感总结和延伸思考...")
-        self.inspiration_summary_text.setMinimumHeight(400)
+        self.inspiration_summary_text.setMinimumHeight(350)
         inspiration_summary_layout.addWidget(self.inspiration_summary_text)
         
-        summary_splitter.addWidget(event_summary_container)
-        summary_splitter.addWidget(inspiration_summary_container)
-        summary_splitter.setStretchFactor(0, 1)
-        summary_splitter.setStretchFactor(1, 1)
+        daily_content_row.addWidget(event_summary_container)
+        daily_content_row.addWidget(inspiration_summary_container)
+        daily_summary_layout.addLayout(daily_content_row)
         
-        content_layout.addWidget(summary_splitter)
+        content_layout.addWidget(daily_summary_container)
         layout.addLayout(content_layout)
     
     def _on_event_summary(self):
@@ -678,6 +684,7 @@ class DailySummaryView(QWidget):
     def set_storage(self, storage):
         """设置存储管理器"""
         self._storage = storage
+        self._load_weekly_summaries_from_database()
         self._load_summary()
     
     def _load_summary(self):
@@ -707,7 +714,519 @@ class DailySummaryView(QWidget):
         """设置灵感卡片"""
         logger.info(f"设置灵感卡片，日期: {self._date}, 卡片数量: {len(inspiration_cards) if inspiration_cards else 0}")
         self._inspiration_cards = inspiration_cards
+
+    def apply_theme(self):
+        """应用主题"""
+        t = get_theme()
+        
+        # 总结按钮样式
+        button_style = f"""
+            QPushButton {{
+                background-color: {t.accent};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 15px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {t.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {t.accent_hover};
+            }}
+            QPushButton:disabled {{
+                background-color: {t.border};
+                color: {t.text_muted};
+            }}
+        """
+        self.event_summary_btn.setStyleSheet(button_style)
+        self.inspiration_summary_btn.setStyleSheet(button_style)
+        
+        # 文本浏览器样式（Markdown 渲染）
+        summary_style = f"""
+            QTextBrowser {{
+                background-color: {t.bg_secondary};
+                color: {t.text_primary};
+                border: 1px solid {t.border};
+                border-radius: 12px;
+                padding: 24px;
+                font-size: 15px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                line-height: 1.8;
+            }}
+            QTextBrowser h1 {{
+                font-size: 24px;
+                font-weight: bold;
+                margin: 16px 0 8px 0;
+                color: {t.text_primary};
+            }}
+            QTextBrowser h2 {{
+                font-size: 20px;
+                font-weight: bold;
+                margin: 14px 0 6px 0;
+                color: {t.text_primary};
+            }}
+            QTextBrowser h3 {{
+                font-size: 18px;
+                font-weight: bold;
+                margin: 12px 0 6px 0;
+                color: {t.text_primary};
+            }}
+            QTextBrowser ul, QTextBrowser ol {{
+                margin: 8px 0 8px 24px;
+            }}
+            QTextBrowser li {{
+                margin: 4px 0;
+            }}
+            QTextBrowser strong {{
+                font-weight: bold;
+                color: {t.text_primary};
+            }}
+            QTextBrowser code {{
+                background-color: {t.bg_tertiary};
+                color: {t.text_secondary};
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-family: "Consolas", "Courier New", monospace;
+                font-size: 14px;
+            }}
+            QTextBrowser pre {{
+                background-color: {t.bg_tertiary};
+                padding: 12px;
+                border-radius: 8px;
+                margin: 8px 0;
+            }}
+            QTextBrowser pre code {{
+                background-color: transparent;
+                padding: 0;
+            }}
+        """
+        
+        self.event_summary_text.setStyleSheet(summary_style)
+        self.inspiration_summary_text.setStyleSheet(summary_style)
+
+
+class WeeklySummaryView(QWidget):
+    """每周总结视图"""
     
+    def __init__(self, storage=None, parent=None):
+        super().__init__(parent)
+        self._cards = []
+        self._inspiration_cards = []
+        self._date = None
+        self._is_generating = False
+        self._event_summary_generated = False
+        self._storage = storage
+        self._workers = {}
+        self._setup_ui()
+        self.apply_theme()
+        get_theme_manager().theme_changed.connect(self.apply_theme)
+        self._load_weekly_summaries_from_database()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # 总结内容显示区域
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(24, 0, 24, 24)
+        
+        # 每周总结区域
+        weekly_summary_container = QWidget()
+        weekly_summary_layout = QVBoxLayout(weekly_summary_container)
+        weekly_summary_layout.setContentsMargins(0, 0, 0, 0)
+        weekly_summary_layout.setSpacing(10)
+        
+        # 每周总结内容行
+        weekly_content_row = QHBoxLayout()
+        weekly_content_row.setSpacing(10)
+        
+        # 事件总结
+        event_summary_container = QWidget()
+        event_summary_layout = QVBoxLayout(event_summary_container)
+        event_summary_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.event_summary_btn = QPushButton("生成本周事件总结")
+        self.event_summary_btn.setFixedSize(140, 40)
+        self.event_summary_btn.setCursor(Qt.PointingHandCursor)
+        self.event_summary_btn.clicked.connect(self._on_event_summary)
+        event_summary_layout.addWidget(self.event_summary_btn)
+        
+        self.event_summary_text = QTextBrowser()
+        self.event_summary_text.setPlaceholderText("点击\"生成本周事件总结\"按钮，系统将为您生成每周活动总结...")
+        self.event_summary_text.setMinimumHeight(350)
+        event_summary_layout.addWidget(self.event_summary_text)
+        
+        # 灵感总结
+        inspiration_summary_container = QWidget()
+        inspiration_summary_layout = QVBoxLayout(inspiration_summary_container)
+        inspiration_summary_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.inspiration_summary_btn = QPushButton("生成本周灵感总结")
+        self.inspiration_summary_btn.setFixedSize(140, 40)
+        self.inspiration_summary_btn.setCursor(Qt.PointingHandCursor)
+        self.inspiration_summary_btn.clicked.connect(self._generate_inspiration_summary)
+        self.inspiration_summary_btn.setEnabled(True)
+        inspiration_summary_layout.addWidget(self.inspiration_summary_btn)
+        
+        self.inspiration_summary_text = QTextBrowser()
+        self.inspiration_summary_text.setPlaceholderText("点击\"生成本周灵感总结\"按钮，系统将为您生成每周灵感总结和延伸思考...")
+        self.inspiration_summary_text.setMinimumHeight(350)
+        inspiration_summary_layout.addWidget(self.inspiration_summary_text)
+        
+        weekly_content_row.addWidget(event_summary_container)
+        weekly_content_row.addWidget(inspiration_summary_container)
+        weekly_summary_layout.addLayout(weekly_content_row)
+        
+        content_layout.addWidget(weekly_summary_container)
+        layout.addLayout(content_layout)
+    
+    def _on_event_summary(self):
+        """生成本周事件总结"""
+        if self._is_generating:
+            return
+        
+        self._is_generating = True
+        self.event_summary_btn.setEnabled(False)
+        
+        if not self._storage:
+            self.event_summary_text.setPlainText("错误：未设置存储管理器")
+            self._is_generating = False
+            self.event_summary_btn.setEnabled(True)
+            return
+        
+        if self._date is None:
+            self._date = datetime.now()
+        
+        try:
+            daily_summaries, missing_days = self._get_past_7_days_event_summaries()
+            logger.info(f"每周事件总结 - 检测到缺失天数: {len(missing_days)}, 每日总结数量: {len(daily_summaries)}")
+            
+            if missing_days:
+                missing_dates_str = ", ".join([d.strftime('%Y-%m-%d') for d in missing_days])
+                logger.info(f"准备弹出确认对话框，缺失日期: {missing_dates_str}")
+                reply = show_question(
+                    self,
+                    "确认生成",
+                    f"过去7天中有{len(missing_days)}天的每日事件总结缺失：\n{missing_dates_str}\n\n是否继续生成本周事件总结？"
+                )
+                logger.info(f"用户回复: {reply}")
+                if reply != QMessageBox.Yes:
+                    self._is_generating = False
+                    self.event_summary_btn.setEnabled(True)
+                    logger.info("用户取消生成")
+                    return
+            
+            self._generate_weekly_event_summary(daily_summaries, missing_days)
+        except Exception as e:
+            logger.error(f"生成本周事件总结失败: {e}")
+            self.event_summary_text.setPlainText(f"生成失败: {e}")
+            self._is_generating = False
+            self.event_summary_btn.setEnabled(True)
+    
+    def _generate_weekly_event_summary(self, daily_summaries, missing_days):
+        """生成每周事件总结"""
+        from PySide6.QtCore import QThread, Signal
+        
+        class WeeklyEventSummaryWorker(QThread):
+            finished = Signal(str)
+            error = Signal(str)
+            
+            def __init__(self, daily_summaries, missing_days, end_date, storage=None):
+                super().__init__()
+                self.daily_summaries = daily_summaries
+                self.missing_days = missing_days
+                self.end_date = end_date
+                self.storage = storage
+            
+            def run(self):
+                try:
+                    logger.info(f"开始生成每周事件总结，每日总结数量: {len(self.daily_summaries)}")
+                    from core.llm_provider import generate_weekly_event_summary_sync
+                    import config
+                    
+                    api_base_url = self.storage.get_setting("api_url", config.API_BASE_URL)
+                    api_key = self.storage.get_setting("api_key", "")
+                    
+                    use_glm = self.storage.get_setting("use_glm_model", "false") == "true"
+                    if use_glm:
+                        summary_model = self.storage.get_setting("daily_summary_model", config.DAILY_SUMMARY_MODEL)
+                    else:
+                        summary_model = self.storage.get_setting("summary_model", config.SUMMARY_MODEL)
+                    
+                    event_summary = generate_weekly_event_summary_sync(
+                        daily_summaries=self.daily_summaries,
+                        missing_days=self.missing_days,
+                        end_date=self.end_date,
+                        model=summary_model,
+                        api_base_url=api_base_url,
+                        api_key=api_key
+                    )
+                    
+                    self.finished.emit(event_summary)
+                except Exception as e:
+                    logger.error(f"生成每周事件总结失败: {e}")
+                    self.error.emit(str(e))
+        
+        self.event_summary_text.setPlainText("正在生成每周事件总结，请稍候...")
+        
+        worker = WeeklyEventSummaryWorker(daily_summaries, missing_days, self._date, self._storage)
+        worker_id = f"weekly_event_{datetime.now().timestamp()}"
+        self._workers[worker_id] = worker
+        
+        def cleanup():
+            self._workers.pop(worker_id, None)
+        
+        worker.finished.connect(lambda summary: self._on_weekly_event_summary_finished(summary, cleanup))
+        worker.error.connect(lambda error: self._on_weekly_event_summary_error(error, cleanup))
+        worker.start()
+    
+    def _on_weekly_event_summary_finished(self, event_summary, cleanup):
+        """每周事件总结生成完成"""
+        cleanup()
+        self._is_generating = False
+        self.event_summary_btn.setEnabled(True)
+        
+        self.event_summary_text.setMarkdown(event_summary if event_summary else "暂无事件总结")
+        
+        if self._storage:
+            try:
+                week_start = self._date - timedelta(days=6)
+                week_end = self._date
+                inspiration_summary = self.inspiration_summary_text.toPlainText()
+                self._storage.save_weekly_summary(week_start, week_end, event_summary, inspiration_summary)
+                logger.info(f"已保存本周事件总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
+            except Exception as e:
+                logger.error(f"保存每周事件总结失败: {e}")
+                show_warning(self, "警告", f"事件总结生成成功，但保存到数据库失败:\n{e}")
+        
+        show_information(self, "成功", "每周事件总结生成完成！")
+    
+    def _on_weekly_event_summary_error(self, error_msg, cleanup):
+        """每周事件总结生成失败"""
+        cleanup()
+        self._is_generating = False
+        self.event_summary_btn.setEnabled(True)
+        
+        self.event_summary_text.setPlainText(f"生成失败: {error_msg}")
+        show_critical(self, "错误", f"每周事件总结生成失败:\n{error_msg}")
+    
+    def _generate_inspiration_summary(self):
+        """生成本周灵感总结"""
+        if self._is_generating:
+            return
+        
+        self._is_generating = True
+        self.inspiration_summary_btn.setEnabled(False)
+        
+        if not self._storage:
+            self.inspiration_summary_text.setPlainText("错误：未设置存储管理器")
+            self._is_generating = False
+            self.inspiration_summary_btn.setEnabled(True)
+            return
+        
+        if self._date is None:
+            self._date = datetime.now()
+        
+        try:
+            daily_summaries, missing_days = self._get_past_7_days_inspiration_summaries()
+            logger.info(f"每周灵感总结 - 检测到缺失天数: {len(missing_days)}, 每日总结数量: {len(daily_summaries)}")
+            
+            if missing_days:
+                missing_dates_str = ", ".join([d.strftime('%Y-%m-%d') for d in missing_days])
+                logger.info(f"准备弹出确认对话框，缺失日期: {missing_dates_str}")
+                reply = show_question(
+                    self,
+                    "确认生成",
+                    f"过去7天中有{len(missing_days)}天的每日灵感总结缺失：\n{missing_dates_str}\n\n是否继续生成本周灵感总结？"
+                )
+                logger.info(f"用户回复: {reply}")
+                if reply != QMessageBox.Yes:
+                    self._is_generating = False
+                    self.inspiration_summary_btn.setEnabled(True)
+                    logger.info("用户取消生成")
+                    return
+            
+            self._generate_weekly_inspiration_summary(daily_summaries, missing_days)
+        except Exception as e:
+            logger.error(f"生成本周灵感总结失败: {e}")
+            self.inspiration_summary_text.setPlainText(f"生成失败: {e}")
+            self._is_generating = False
+            self.inspiration_summary_btn.setEnabled(True)
+    
+    def _generate_weekly_inspiration_summary(self, daily_summaries, missing_days):
+        """生成每周灵感总结"""
+        from PySide6.QtCore import QThread, Signal
+        
+        class WeeklyInspirationSummaryWorker(QThread):
+            finished = Signal(str)
+            error = Signal(str)
+            
+            def __init__(self, daily_summaries, missing_days, end_date, storage=None):
+                super().__init__()
+                self.daily_summaries = daily_summaries
+                self.missing_days = missing_days
+                self.end_date = end_date
+                self.storage = storage
+            
+            def run(self):
+                try:
+                    logger.info(f"开始生成每周灵感总结，每日总结数量: {len(self.daily_summaries)}")
+                    from core.llm_provider import generate_weekly_inspiration_summary_sync
+                    import config
+                    
+                    api_base_url = self.storage.get_setting("api_url", config.API_BASE_URL)
+                    api_key = self.storage.get_setting("api_key", "")
+                    
+                    use_glm = self.storage.get_setting("use_glm_model", "false") == "true"
+                    if use_glm:
+                        summary_model = self.storage.get_setting("daily_summary_model", config.DAILY_SUMMARY_MODEL)
+                    else:
+                        summary_model = self.storage.get_setting("summary_model", config.SUMMARY_MODEL)
+                    
+                    inspiration_summary = generate_weekly_inspiration_summary_sync(
+                        daily_summaries=self.daily_summaries,
+                        missing_days=self.missing_days,
+                        end_date=self.end_date,
+                        model=summary_model,
+                        api_base_url=api_base_url,
+                        api_key=api_key
+                    )
+                    
+                    self.finished.emit(inspiration_summary)
+                except Exception as e:
+                    logger.error(f"生成每周灵感总结失败: {e}")
+                    self.error.emit(str(e))
+        
+        self.inspiration_summary_text.setPlainText("正在生成每周灵感总结，请稍候...")
+        
+        worker = WeeklyInspirationSummaryWorker(daily_summaries, missing_days, self._date, self._storage)
+        worker_id = f"weekly_inspiration_{datetime.now().timestamp()}"
+        self._workers[worker_id] = worker
+        
+        def cleanup():
+            self._workers.pop(worker_id, None)
+        
+        worker.finished.connect(lambda summary: self._on_weekly_inspiration_summary_finished(summary, cleanup))
+        worker.error.connect(lambda error: self._on_weekly_inspiration_summary_error(error, cleanup))
+        worker.start()
+    
+    def _on_weekly_inspiration_summary_finished(self, inspiration_summary, cleanup):
+        """每周灵感总结生成完成"""
+        cleanup()
+        self._is_generating = False
+        self.inspiration_summary_btn.setEnabled(True)
+        
+        self.inspiration_summary_text.setMarkdown(inspiration_summary if inspiration_summary else "暂无灵感总结")
+        
+        if self._storage:
+            try:
+                week_start = self._date - timedelta(days=6)
+                week_end = self._date
+                event_summary = self.event_summary_text.toPlainText()
+                self._storage.save_weekly_summary(week_start, week_end, event_summary, inspiration_summary)
+                logger.info(f"已保存本周灵感总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
+            except Exception as e:
+                logger.error(f"保存每周灵感总结失败: {e}")
+                show_warning(self, "警告", f"灵感总结生成成功，但保存到数据库失败:\n{e}")
+        
+        show_information(self, "成功", "每周灵感总结生成完成！")
+    
+    def _on_weekly_inspiration_summary_error(self, error_msg, cleanup):
+        """每周灵感总结生成失败"""
+        cleanup()
+        self._is_generating = False
+        self.inspiration_summary_btn.setEnabled(True)
+        
+        self.inspiration_summary_text.setPlainText(f"生成失败: {error_msg}")
+        show_critical(self, "错误", f"每周灵感总结生成失败:\n{error_msg}")
+    
+    def _get_past_7_days_event_summaries(self):
+        """获取过去7天的每日事件总结"""
+        daily_summaries = []
+        missing_days = []
+        
+        for i in range(7):
+            date = self._date - timedelta(days=6 - i)
+            event_summary, inspiration_summary = self._storage.get_daily_summary(date)
+            
+            if event_summary is None:
+                missing_days.append(date)
+            else:
+                daily_summaries.append({
+                    'date': date,
+                    'event_summary': event_summary,
+                    'inspiration_summary': inspiration_summary or ""
+                })
+        
+        return daily_summaries, missing_days
+    
+    def _get_past_7_days_inspiration_summaries(self):
+        """获取过去7天的每日灵感总结"""
+        daily_summaries = []
+        missing_days = []
+        
+        for i in range(7):
+            date = self._date - timedelta(days=6 - i)
+            event_summary, inspiration_summary = self._storage.get_daily_summary(date)
+            
+            if inspiration_summary is None:
+                missing_days.append(date)
+            else:
+                daily_summaries.append({
+                    'date': date,
+                    'event_summary': event_summary or "",
+                    'inspiration_summary': inspiration_summary
+                })
+        
+        return daily_summaries, missing_days
+    
+    def set_cards(self, cards):
+        """设置活动卡片"""
+        self._cards = cards
+    
+    def set_date(self, date):
+        """设置日期"""
+        self._date = date
+        self._load_weekly_summaries_from_database()
+    
+    def set_storage(self, storage):
+        """设置存储管理器"""
+        self._storage = storage
+        self._load_weekly_summaries_from_database()
+    
+    def _load_weekly_summaries_from_database(self):
+        """从数据库加载每周总结"""
+        if not self._storage:
+            return
+        
+        try:
+            if self._date is None:
+                self._date = datetime.now()
+            
+            week_start = self._date - timedelta(days=6)
+            week_end = self._date
+            
+            event_summary, inspiration_summary = self._storage.get_weekly_summary(week_start, week_end)
+            
+            if event_summary:
+                self.event_summary_text.setMarkdown(event_summary)
+                logger.info(f"已加载本周事件总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
+            
+            if inspiration_summary:
+                self.inspiration_summary_text.setMarkdown(inspiration_summary)
+                logger.info(f"已加载本周灵感总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
+                
+        except Exception as e:
+            logger.error(f"加载每周总结失败: {e}")
+    
+    def set_inspiration_cards(self, inspiration_cards):
+        """设置灵感卡片"""
+        logger.info(f"设置灵感卡片，卡片数量: {len(inspiration_cards) if inspiration_cards else 0}")
+        self._inspiration_cards = inspiration_cards
+
     def apply_theme(self):
         """应用主题"""
         t = get_theme()
@@ -890,6 +1409,10 @@ class DailyEventView(QWidget):
         self.summary_tab.clicked.connect(lambda: self._switch_tab(2))
         tabs_layout.addWidget(self.summary_tab)
         
+        self.weekly_summary_tab = SubTabButton("近7日总结")
+        self.weekly_summary_tab.clicked.connect(lambda: self._switch_tab(3))
+        tabs_layout.addWidget(self.weekly_summary_tab)
+        
         tabs_layout.addStretch()
         main_layout.addLayout(tabs_layout)
         
@@ -913,6 +1436,10 @@ class DailyEventView(QWidget):
         self.summary_view = DailySummaryView(storage=self._storage)
         self.stack.addWidget(self.summary_view)
         
+        # 每周总结页面
+        self.weekly_summary_view = WeeklySummaryView(storage=self._storage)
+        self.stack.addWidget(self.weekly_summary_view)
+        
         main_layout.addWidget(self.stack)
     
     def apply_theme(self):
@@ -920,6 +1447,7 @@ class DailyEventView(QWidget):
         self.timeline_tab.apply_theme(True)
         self.inspiration_tab.apply_theme(False)
         self.summary_tab.apply_theme(False)
+        self.weekly_summary_tab.apply_theme(False)
     
     def _switch_tab(self, index: int):
         """切换子选项卡"""
@@ -932,6 +1460,8 @@ class DailyEventView(QWidget):
             self.inspiration_tab.apply_theme(False)
             self.summary_tab.setChecked(False)
             self.summary_tab.apply_theme(False)
+            self.weekly_summary_tab.setChecked(False)
+            self.weekly_summary_tab.apply_theme(False)
         elif index == 1:
             self.timeline_tab.setChecked(False)
             self.timeline_tab.apply_theme(False)
@@ -939,14 +1469,27 @@ class DailyEventView(QWidget):
             self.inspiration_tab.apply_theme(True)
             self.summary_tab.setChecked(False)
             self.summary_tab.apply_theme(False)
-        else:
+            self.weekly_summary_tab.setChecked(False)
+            self.weekly_summary_tab.apply_theme(False)
+        elif index == 2:
             self.timeline_tab.setChecked(False)
             self.timeline_tab.apply_theme(False)
             self.inspiration_tab.setChecked(False)
             self.inspiration_tab.apply_theme(False)
             self.summary_tab.setChecked(True)
             self.summary_tab.apply_theme(True)
+            self.weekly_summary_tab.setChecked(False)
+            self.weekly_summary_tab.apply_theme(False)
             self.summary_view._load_summary()
+        else:
+            self.timeline_tab.setChecked(False)
+            self.timeline_tab.apply_theme(False)
+            self.inspiration_tab.setChecked(False)
+            self.inspiration_tab.apply_theme(False)
+            self.summary_tab.setChecked(False)
+            self.summary_tab.apply_theme(False)
+            self.weekly_summary_tab.setChecked(True)
+            self.weekly_summary_tab.apply_theme(True)
     
     def _on_date_changed(self, date: datetime):
         """日期改变"""
@@ -954,6 +1497,7 @@ class DailyEventView(QWidget):
         self.timeline_view.set_date(date)
         self.inspiration_view.set_date(date)
         self.summary_view.set_date(date)
+        self.weekly_summary_view.set_date(date)
         self.date_changed.emit(date)
     
     def _on_inspiration_updated(self):
@@ -981,6 +1525,7 @@ class DailyEventView(QWidget):
         self.inspiration_view.set_date(date)
         self.summary_view.set_date(date)
         self.summary_view.set_inspiration_cards(self.inspiration_view.get_cards())
+        self.weekly_summary_view.set_date(date)
     
     def get_current_date(self) -> datetime:
         """获取当前查看的日期"""

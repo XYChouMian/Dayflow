@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Optional
 import sys
 import time
+import shutil
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -38,6 +40,7 @@ from ui.themes import (
 )
 from core.types import ActivityCard
 from core.health_reminder import HealthReminder
+from core.data_migration import DataMigrationManager, DataMigrationError
 from database.storage import StorageManager
 
 logger = logging.getLogger(__name__)
@@ -468,8 +471,13 @@ class SettingsPanel(QWidget):
         self._frames = []  # 存储需要主题化的 frame
         self._titles = []  # 存储标题
         self._descs = []   # 存储描述文字
+        
+        # 数据迁移管理器
+        self.data_migration_manager = DataMigrationManager()
+        
         self._setup_ui()
         self._load_settings()
+        self._update_data_path_display()
         self.apply_theme()
         get_theme_manager().theme_changed.connect(self.apply_theme)
         
@@ -481,6 +489,7 @@ class SettingsPanel(QWidget):
         frame = QFrame()
         frame.setObjectName("settingsCard")
         self._frames.append(frame)
+        frame.setMinimumWidth(250)  # 确保能容纳数据管理框的三个按钮
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(20, 16, 20, 16)
         frame_layout.setSpacing(10)
@@ -546,15 +555,11 @@ class SettingsPanel(QWidget):
         api_layout.addWidget(glm_label)
         
         glm_row = QHBoxLayout()
-        self.use_glm_radio = QRadioButton("使用 GLM 模型")
-        self.use_glm_radio.setChecked(True)
-        self.use_glm_radio.toggled.connect(self._on_glm_mode_changed)
-        glm_row.addWidget(self.use_glm_radio)
-        
-        self.use_custom_radio = QRadioButton("使用其他模型")
-        self.use_custom_radio.setChecked(False)
-        self.use_custom_radio.toggled.connect(self._on_glm_mode_changed)
-        glm_row.addWidget(self.use_custom_radio)
+        self.model_switch_btn = QPushButton("使用其他模型")
+        self.model_switch_btn.setMinimumHeight(40)
+        self.model_switch_btn.setMaximumWidth(200)
+        self.model_switch_btn.clicked.connect(self._toggle_model_mode)
+        glm_row.addWidget(self.model_switch_btn)
         glm_row.addStretch()
         api_layout.addLayout(glm_row)
         
@@ -629,7 +634,7 @@ class SettingsPanel(QWidget):
         api_layout.addWidget(self.visual_thinking_combo)
         
         # 每日总结模型选择下拉框
-        self.summary_model_label = QLabel("每日总结模型")
+        self.summary_model_label = QLabel("语言模型")
         self.summary_model_label.setObjectName("cardDesc")
         self._descs.append(self.summary_model_label)
         api_layout.addWidget(self.summary_model_label)
@@ -735,7 +740,7 @@ class SettingsPanel(QWidget):
         record_layout.setContentsMargins(20, 16, 20, 16)
         record_layout.setSpacing(10)
         
-        self._create_title("🎬 录制", record_layout)
+        self._create_title("🎬 录制设置", record_layout)
         fps = 1.0 / config.RECORD_FRAME_INTERVAL
         record_desc = QLabel(f"帧间隔: {config.RECORD_FRAME_INTERVAL}秒/帧 (FPS: {fps:.2f}) | 切片: {config.CHUNK_DURATION_SECONDS}秒")
         record_desc.setObjectName("cardDesc")
@@ -765,41 +770,50 @@ class SettingsPanel(QWidget):
         settings_row.addWidget(record_frame)
         layout.addLayout(settings_row)
         
-        # === 数据管理 ===
-        data_frame, data_layout = self._create_card(layout)
+        # === 数据管理 + 开机启动（一行两列）===
+        data_autostart_row = QHBoxLayout()
+        data_autostart_row.setSpacing(16)
+        
+        # 数据管理
+        data_frame, data_layout = self._create_card(data_autostart_row)
+        data_autostart_row.setStretchFactor(data_frame, 1)  # 设置拉伸因子为1
         self._create_title("💾 数据管理", data_layout)
-        self._create_desc("导出或导入您的所有活动数据", data_layout)
+        desc = QLabel("导出或导入您的所有活动数据")
+        desc.setObjectName("cardDesc")
+        desc.setWordWrap(True)
+        self._descs.append(desc)
+        data_layout.addWidget(desc)
         
         data_row = QHBoxLayout()
         data_row.setSpacing(10)
         
         self.export_btn = QPushButton("📤 导出数据")
         self.export_btn.setCursor(Qt.PointingHandCursor)
-        self.export_btn.setFixedHeight(38)
+        self.export_btn.setMinimumHeight(38)
         self.export_btn.clicked.connect(self._export_data)
-        data_row.addWidget(self.export_btn)
+        data_row.addWidget(self.export_btn, 1)  # 拉伸因子为1，实现等分
         
         self.import_btn = QPushButton("📥 导入数据")
         self.import_btn.setCursor(Qt.PointingHandCursor)
-        self.import_btn.setFixedHeight(38)
+        self.import_btn.setMinimumHeight(38)
         self.import_btn.clicked.connect(self._import_data)
-        data_row.addWidget(self.import_btn)
+        data_row.addWidget(self.import_btn, 1)  # 拉伸因子为1，实现等分
         
         self.dashboard_btn = QPushButton("📊 导出仪表盘")
         self.dashboard_btn.setCursor(Qt.PointingHandCursor)
-        self.dashboard_btn.setFixedHeight(38)
+        self.dashboard_btn.setMinimumHeight(38)
         self.dashboard_btn.clicked.connect(self._export_dashboard)
-        data_row.addWidget(self.dashboard_btn)
-        
-        data_row.addStretch()
+        data_row.addWidget(self.dashboard_btn, 1)  # 拉伸因子为1，实现等分
         data_layout.addLayout(data_row)
         
-        # === 开机启动 ===
-        autostart_frame, autostart_layout = self._create_card(layout)
+        # 开机启动
+        autostart_frame, autostart_layout = self._create_card(data_autostart_row)
+        data_autostart_row.setStretchFactor(autostart_frame, 1)  # 设置拉伸因子为1
         self._create_title("🚀 开机启动", autostart_layout)
         
         autostart_desc = QLabel("开机时自动启动 Dayflow 并最小化到系统托盘")
         autostart_desc.setObjectName("cardDesc")
+        autostart_desc.setWordWrap(True)
         self._descs.append(autostart_desc)
         autostart_layout.addWidget(autostart_desc)
         
@@ -809,10 +823,10 @@ class SettingsPanel(QWidget):
         
         self.autostart_btn = QPushButton("⚪ 未启用")
         self.autostart_btn.setCursor(Qt.PointingHandCursor)
-        self.autostart_btn.setFixedHeight(38)
+        self.autostart_btn.setMinimumHeight(38)
         self.autostart_btn.setCheckable(True)
         self.autostart_btn.clicked.connect(self._toggle_autostart)
-        autostart_btn_row.addWidget(self.autostart_btn)
+        autostart_btn_row.addWidget(self.autostart_btn, 1)  # 拉伸因子为1，保持同步
         
         self.autostart_status = QLabel("")
         self.autostart_status.setObjectName("cardDesc")
@@ -825,11 +839,19 @@ class SettingsPanel(QWidget):
         # 初始化自启动状态
         self._init_autostart_status()
         
-        # === 分析设置 ===
-        analysis_frame, analysis_layout = self._create_card(layout)
+        layout.addLayout(data_autostart_row)
+        
+        # === 分析设置 + 健康提醒（一行两列）===
+        analysis_health_row = QHBoxLayout()
+        analysis_health_row.setSpacing(16)
+        
+        # 分析设置
+        analysis_frame, analysis_layout = self._create_card(analysis_health_row)
+        analysis_health_row.setStretchFactor(analysis_frame, 1)  # 设置拉伸因子为1
         self._create_title("📊 分析设置", analysis_layout)
         analysis_desc = QLabel("设置视频分析的批次大小，控制每次分析的视频数量")
         analysis_desc.setObjectName("cardDesc")
+        analysis_desc.setWordWrap(True)
         self._descs.append(analysis_desc)
         analysis_layout.addWidget(analysis_desc)
         
@@ -849,9 +871,10 @@ class SettingsPanel(QWidget):
         analysis_layout.addLayout(batch_chunk_row)
         
         # 说明文字
-        batch_hint = QLabel("较大的值会减少分析频率但每次处理时间更长，较小的值会增加分析频率")
+        batch_hint = QLabel("较大的值会减少分析频率但每次处理时间更长，\n较小的值会增加分析频率")
         batch_hint.setObjectName("cardDesc")
         batch_hint.setStyleSheet("font-size: 11px; color: #888;")
+        batch_hint.setWordWrap(True)
         self._descs.append(batch_hint)
         analysis_layout.addWidget(batch_hint)
         
@@ -867,11 +890,13 @@ class SettingsPanel(QWidget):
         
         analysis_layout.addLayout(analysis_btn_row)
         
-        # === 健康提醒设置 ===
-        health_frame, health_layout = self._create_card(layout)
+        # 健康提醒设置
+        health_frame, health_layout = self._create_card(analysis_health_row)
+        analysis_health_row.setStretchFactor(health_frame, 1)  # 设置拉伸因子为1
         self._create_title("💪 健康提醒", health_layout)
         health_desc = QLabel("自动检测您的活动状态并提醒您适时休息")
         health_desc.setObjectName("cardDesc")
+        health_desc.setWordWrap(True)
         self._descs.append(health_desc)
         health_layout.addWidget(health_desc)
         
@@ -954,9 +979,80 @@ class SettingsPanel(QWidget):
         
         health_layout.addLayout(health_btn_row)
         
-        # === 日志查看 ===
-        log_frame, log_layout = self._create_card(layout)
-        self._create_title("📋 运行日志", log_layout)
+        layout.addLayout(analysis_health_row)
+        
+        # === 数据存储位置迁移 + 运行日志（一行两列）===
+        data_log_row = QHBoxLayout()
+        data_log_row.setSpacing(16)
+        
+        # 数据存储位置迁移
+        data_frame = QFrame()
+        data_frame.setObjectName("settingsCard")
+        self._frames.append(data_frame)
+        data_layout = QVBoxLayout(data_frame)
+        data_layout.setContentsMargins(20, 16, 20, 16)
+        data_layout.setSpacing(10)
+        
+        data_title = QLabel("💾 数据存储位置")
+        data_title.setObjectName("cardTitle")
+        data_title.setMinimumHeight(24)
+        self._titles.append(data_title)
+        data_layout.addWidget(data_title)
+        
+        data_desc = QLabel("管理数据存储位置，将数据迁移到其他磁盘")
+        data_desc.setObjectName("cardDesc")
+        data_desc.setWordWrap(True)
+        self._descs.append(data_desc)
+        data_layout.addWidget(data_desc)
+        
+        # 当前路径显示
+        current_path_row = QHBoxLayout()
+        current_path_label = QLabel("当前路径:")
+        current_path_label.setObjectName("cardDesc")
+        current_path_label.setFixedWidth(80)
+        current_path_row.addWidget(current_path_label)
+        
+        self.data_path_edit = QLineEdit()
+        self.data_path_edit.setReadOnly(True)
+        self.data_path_edit.setFixedHeight(38)
+        self.data_path_edit.setPlaceholderText("加载中...")
+        current_path_row.addWidget(self.data_path_edit)
+        
+        data_layout.addLayout(current_path_row)
+        
+        # 状态显示
+        self.data_status_label = QLabel("状态: 检查中...")
+        self.data_status_label.setObjectName("cardDesc")
+        data_layout.addWidget(self.data_status_label)
+        
+        # 按钮行
+        data_btn_row = QHBoxLayout()
+        data_btn_row.setSpacing(10)
+        
+        self.migrate_data_btn = QPushButton("📁 修改存储位置")
+        self.migrate_data_btn.setCursor(Qt.PointingHandCursor)
+        self.migrate_data_btn.setFixedHeight(38)
+        self.migrate_data_btn.clicked.connect(self._migrate_data)
+        data_btn_row.addWidget(self.migrate_data_btn)
+        
+        data_btn_row.addStretch()
+        data_layout.addLayout(data_btn_row)
+        
+        data_log_row.addWidget(data_frame)
+        
+        # 运行日志
+        log_frame = QFrame()
+        log_frame.setObjectName("settingsCard")
+        self._frames.append(log_frame)
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(20, 16, 20, 16)
+        log_layout.setSpacing(10)
+        
+        log_title = QLabel("📋 运行日志")
+        log_title.setObjectName("cardTitle")
+        log_title.setMinimumHeight(24)
+        self._titles.append(log_title)
+        log_layout.addWidget(log_title)
         
         log_desc = QLabel("查看应用运行日志，便于排查问题")
         log_desc.setObjectName("cardDesc")
@@ -997,6 +1093,9 @@ class SettingsPanel(QWidget):
         self.log_text.hide()
         self.log_text.setPlaceholderText("点击「查看日志」加载日志内容...")
         log_layout.addWidget(self.log_text)
+        
+        data_log_row.addWidget(log_frame)
+        layout.addLayout(data_log_row)
         
         # === 关于 ===
         about_frame, about_layout = self._create_card(layout)
@@ -1135,8 +1234,7 @@ class SettingsPanel(QWidget):
                 color: {t.text_primary};
             }}
         """
-        self.use_glm_radio.setStyleSheet(radio_style)
-        self.use_custom_radio.setStyleSheet(radio_style)
+        self.model_switch_btn.setStyleSheet(reset_btn_style)
         
         # 模型下拉框样式
         combo_style = f"""
@@ -1395,8 +1493,7 @@ class SettingsPanel(QWidget):
     def _load_settings(self):
         # 加载 GLM 模式设置
         use_glm = self.storage.get_setting("use_glm_model", "true") == "true"
-        self.use_glm_radio.setChecked(use_glm)
-        self.use_custom_radio.setChecked(not use_glm)
+        self._update_model_switch_button(use_glm)
         
         # 加载 API 设置
         api_url = self.storage.get_setting("api_url", config.API_BASE_URL)
@@ -1437,8 +1534,7 @@ class SettingsPanel(QWidget):
         if summary_thinking_index >= 0:
             self.summary_thinking_combo.setCurrentIndex(summary_thinking_index)
         
-        # 根据GLM模式更新UI状态
-        self._on_glm_mode_changed()
+        # 根据GLM模式更新UI状态（已在_update_model_switch_button中处理）
         
         # 根据模型是否支持 thinking 更新 UI 状态
         if model_index >= 0:
@@ -1462,6 +1558,9 @@ class SettingsPanel(QWidget):
         batch_chunk = self.storage.get_setting("batch_chunk_count", str(config.BATCH_CHUNK_COUNT))
         self.batch_chunk_input.setText(batch_chunk)
         
+        # 断开健康提醒按钮信号，避免在加载设置时触发切换
+        self.health_enable_btn.clicked.disconnect()
+        
         # 加载健康提醒设置
         health_enabled = self.storage.get_setting("health_reminder_enabled", "true") == "true"
         self.health_enable_btn.setChecked(health_enabled)
@@ -1475,6 +1574,9 @@ class SettingsPanel(QWidget):
         
         cooldown = self.storage.get_setting("health_cooldown", str(config.HEALTH_REMINDER_COOLDOWN))
         self.cooldown_input.setText(cooldown)
+        
+        # 重新连接健康提醒按钮信号
+        self.health_enable_btn.clicked.connect(self._toggle_health_reminder)
     
     def _reset_api_url(self):
         """恢复 API 地址为默认值"""
@@ -1483,11 +1585,10 @@ class SettingsPanel(QWidget):
         self.api_url_input.selectAll()
         show_information(self, "已恢复", f"API 地址已恢复为默认值：\n{default_url}")
     
-    def _on_glm_mode_changed(self):
-        """GLM模式切换时更新UI状态"""
-        use_glm = self.use_glm_radio.isChecked()
-        
+    def _update_model_switch_button(self, use_glm: bool):
+        """更新模型切换按钮的文本和UI状态"""
         if use_glm:
+            self.model_switch_btn.setText("使用其他模型")
             # 使用GLM模型
             self.api_model_combo.show()
             self.api_model_input.hide()
@@ -1498,6 +1599,7 @@ class SettingsPanel(QWidget):
             self.summary_thinking_label.show()
             self.summary_thinking_combo.show()
         else:
+            self.model_switch_btn.setText("使用智谱系列模型")
             # 使用其他模型
             self.api_model_combo.hide()
             self.api_model_input.show()
@@ -1507,6 +1609,23 @@ class SettingsPanel(QWidget):
             self.visual_thinking_combo.hide()
             self.summary_thinking_label.hide()
             self.summary_thinking_combo.hide()
+    
+    def _toggle_model_mode(self):
+        """切换模型模式"""
+        # 获取当前模式（根据按钮文本判断）
+        current_text = self.model_switch_btn.text()
+        use_glm = (current_text == "使用其他模型")  # 如果显示"使用其他模型"，说明当前是GLM模式
+        
+        # 切换到另一种模式
+        use_glm = not use_glm
+        
+        # 更新按钮文本和UI
+        self._update_model_switch_button(use_glm)
+        
+        # 保存设置
+        self.storage.set_setting("use_glm_model", "true" if use_glm else "false")
+        
+        logger.info(f"已切换模型模式: {'GLM' if use_glm else '自定义'}")
     
     def _on_model_changed(self, index: int):
         """模型选择变化时，更新思考模式的可用状态"""
@@ -1519,7 +1638,8 @@ class SettingsPanel(QWidget):
     def _save_api_config(self):
         """保存 API 配置"""
         try:
-            use_glm = self.use_glm_radio.isChecked()
+            # 根据按钮文本判断当前模式
+            use_glm = self.model_switch_btn.text() == "使用其他模型"
             api_url = self.api_url_input.text().strip() or config.API_BASE_URL
             api_key = self.api_key_input.text().strip()
             
@@ -1589,7 +1709,8 @@ class SettingsPanel(QWidget):
         import asyncio
         from core.llm_provider import DayflowBackendProvider
         
-        use_glm = self.use_glm_radio.isChecked()
+        # 根据按钮文本判断当前模式
+        use_glm = self.model_switch_btn.text() == "使用其他模型"
         api_url = self.api_url_input.text().strip() or config.API_BASE_URL
         api_key = self.api_key_input.text().strip()
         
@@ -2028,6 +2149,133 @@ class SettingsPanel(QWidget):
             subprocess.run(['explorer', str(log_dir)])
         else:
             show_warning(self, "提示", f"日志目录不存在:\n{log_dir}")
+    
+    def _update_data_path_display(self):
+        """更新数据路径显示"""
+        try:
+            current_path, is_config_driven = self.data_migration_manager.get_current_data_path()
+            
+            if is_config_driven:
+                self.data_path_edit.setText(str(current_path))
+                self.data_status_label.setText("状态: 已迁移到新位置")
+                self.data_status_label.setStyleSheet("color: #4CAF50;")
+            else:
+                self.data_path_edit.setText(str(current_path))
+                self.data_status_label.setText("状态: 使用默认位置")
+                self.data_status_label.setStyleSheet("color: #FFA500;")
+                
+        except Exception as e:
+            logger.error(f"更新数据路径显示失败: {e}")
+            self.data_path_edit.setText("获取失败")
+            self.data_status_label.setText("状态: 错误")
+            self.data_status_label.setStyleSheet("color: #F44336;")
+    
+    def _migrate_data(self):
+        """迁移数据到新位置"""
+        from PySide6.QtWidgets import QProgressDialog
+        
+        # 选择目标路径
+        target_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择数据存储位置",
+            str(Path.home()),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
+        
+        if not target_path:
+            return
+        
+        target_path = Path(target_path)
+        
+        # 验证目标路径
+        is_valid, error_msg = self.data_migration_manager.validate_target_path(target_path)
+        if not is_valid:
+            QMessageBox.warning(self, "路径验证失败", error_msg)
+            return
+        
+        # 确认迁移
+        confirm_msg = f"确定要将数据迁移到以下位置吗？\n\n{target_path}\n\n"
+        confirm_msg += "此操作将会：\n"
+        confirm_msg += "1. 将现有数据复制到新位置\n"
+        confirm_msg += "2. 更新配置文件，指向新的数据位置\n"
+        confirm_msg += "3. 原数据将在下次启动时自动删除\n"
+        confirm_msg += "4. 配置将在下次启动时生效\n\n"
+        confirm_msg += "提示：建议先备份数据"
+        
+        reply = QMessageBox.question(
+            self,
+            "确认数据迁移",
+            confirm_msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # 创建进度对话框
+        progress = QProgressDialog("正在迁移数据，请稍候...", "取消", 0, 0, self)
+        progress.setWindowTitle("数据迁移")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        # 创建迁移线程
+        from PySide6.QtCore import QThread, Signal
+        
+        class MigrationThread(QThread):
+            finished = Signal(bool, str)
+            
+            def __init__(self, manager, target_path):
+                super().__init__()
+                self.manager = manager
+                self.target_path = target_path
+                self._is_cancelled = False
+            
+            def run(self):
+                try:
+                    if not self._is_cancelled:
+                        self.manager.migrate_data(self.target_path)
+                        self.finished.emit(True, "数据迁移成功！")
+                    else:
+                        self.finished.emit(False, "迁移已取消")
+                except DataMigrationError as e:
+                    self.finished.emit(False, str(e))
+                except Exception as e:
+                    self.finished.emit(False, f"迁移失败: {str(e)}")
+            
+            def cancel(self):
+                self._is_cancelled = True
+                self.quit()
+                self.wait()
+        
+        # 保存线程引用（防止被垃圾回收）
+        self.migration_thread = MigrationThread(self.data_migration_manager, target_path)
+        
+        def on_migration_finished(success, message):
+            progress.close()
+            
+            # 清理线程引用
+            if hasattr(self, 'migration_thread'):
+                self.migration_thread = None
+            
+            if success:
+                success_msg = (
+                    "数据已成功迁移！\n\n"
+                    "配置已更新，请重新启动程序。\n"
+                    "原数据将在下次启动时自动删除。"
+                )
+                QMessageBox.information(self, "成功", success_msg)
+                self._update_data_path_display()
+            else:
+                QMessageBox.critical(self, "失败", message)
+        
+        def on_progress_canceled():
+            if hasattr(self, 'migration_thread') and self.migration_thread:
+                self.migration_thread.cancel()
+        
+        self.migration_thread.finished.connect(on_migration_finished)
+        progress.canceled.connect(on_progress_canceled)
+        self.migration_thread.start()
     
     def _init_autostart_status(self):
         """初始化自启动状态"""

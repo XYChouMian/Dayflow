@@ -18,6 +18,7 @@ from PySide6.QtGui import QFont
 import config
 from ui.main_window import MainWindow
 from core.log_manager import LogManager
+from core.data_migration import DataMigrationManager
 
 # 全局日志管理器实例
 _log_manager = None
@@ -106,6 +107,22 @@ def main():
     # 解析命令行参数
     args = parse_args()
     
+    # 初始化数据迁移管理器并获取配置的数据路径（必须在日志初始化之前）
+    data_migration_manager = DataMigrationManager()
+    
+    # 清理旧数据文件夹（如果有）
+    data_migration_manager.cleanup_old_data()
+    
+    # 更新全局配置中的数据路径（使用配置驱动的路径）
+    config.APP_DATA_DIR = data_migration_manager.default_data_dir
+    config.CHUNKS_DIR = config.APP_DATA_DIR / "chunks"
+    config.DATABASE_PATH = config.APP_DATA_DIR / "dayflow.db"
+    
+    # 确保目录存在
+    config.APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    config.CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 配置日志（使用 LogManager 实现轮转）
     setup_logging()
     logger = logging.getLogger(__name__)
     

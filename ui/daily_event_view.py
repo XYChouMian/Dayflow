@@ -477,6 +477,8 @@ class DailySummaryView(QWidget):
         self._is_generating = True
         self.event_summary_btn.setEnabled(False)
         
+        self.event_summary_text.setPlainText("正在生成每日事件总结，请稍候...")
+        
         from PySide6.QtCore import QThread, Signal
         
         class EventSummaryWorker(QThread):
@@ -565,6 +567,8 @@ class DailySummaryView(QWidget):
         
         self._is_generating = True
         self.inspiration_summary_btn.setEnabled(False)
+        
+        self.inspiration_summary_text.setPlainText("正在生成每日灵感总结，请稍候...")
         
         from PySide6.QtCore import QThread, Signal
         
@@ -1125,7 +1129,15 @@ class WeeklySummaryView(QWidget):
             try:
                 week_start = self._date - timedelta(days=6)
                 week_end = self._date
-                event_summary = self.event_summary_text.toPlainText()
+                # 从数据库获取已保存的事件总结，保持markdown格式
+                event_summary = None
+                try:
+                    saved_event_summary, saved_inspiration_summary = self._storage.get_weekly_summary(week_start, week_end)
+                    if saved_event_summary:
+                        event_summary = saved_event_summary
+                except Exception:
+                    pass
+                
                 self._storage.save_weekly_summary(week_start, week_end, event_summary, inspiration_summary)
                 logger.info(f"已保存本周灵感总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
             except Exception as e:
@@ -1214,10 +1226,16 @@ class WeeklySummaryView(QWidget):
             if event_summary:
                 self.event_summary_text.setMarkdown(event_summary)
                 logger.info(f"已加载本周事件总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
+            else:
+                self.event_summary_text.setMarkdown("")
+                logger.info(f"本周暂无事件总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
             
             if inspiration_summary:
                 self.inspiration_summary_text.setMarkdown(inspiration_summary)
                 logger.info(f"已加载本周灵感总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
+            else:
+                self.inspiration_summary_text.setMarkdown("")
+                logger.info(f"本周暂无灵感总结 {week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}")
                 
         except Exception as e:
             logger.error(f"加载每周总结失败: {e}")

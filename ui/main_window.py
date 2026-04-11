@@ -2261,11 +2261,23 @@ class SettingsPanel(QWidget):
             if success:
                 success_msg = (
                     "数据已成功迁移！\n\n"
-                    "配置已更新，请重新启动程序。\n"
-                    "原数据将在下次启动时自动删除。"
+                    "配置已更新，需要重新启动程序。\n"
+                    "原数据将在下次启动时自动删除。\n\n"
+                    "是否立即重新启动？"
                 )
-                QMessageBox.information(self, "成功", success_msg)
+                reply = QMessageBox.question(
+                    self, 
+                    "成功", 
+                    success_msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
                 self._update_data_path_display()
+                
+                if reply == QMessageBox.Yes:
+                    if self.main_window:
+                        self.main_window._restart_application()
             else:
                 QMessageBox.critical(self, "失败", message)
         
@@ -3477,6 +3489,55 @@ class MainWindow(QMainWindow):
         if self.storage:
             self.storage.close()
         
+        QApplication.quit()
+    
+    def _restart_application(self):
+        """重启应用"""
+        import subprocess
+        from core.autostart import is_frozen, get_exe_path
+        
+        # 停止录制和分析
+        if self.recording_manager and self.recording_manager.is_recording:
+            self.recording_manager.stop_recording()
+        self._stop_analysis()
+        
+        # 关闭数据库
+        if self.storage:
+            self.storage.close()
+        
+        # 获取启动命令
+        if is_frozen():
+            # 打包后的 EXE
+            exe_path = get_exe_path()
+            # 使用引号包裹路径，防止路径中包含空格
+            startup_command = f'"{exe_path}"'
+        else:
+            # 开发环境：不重启，显示警告
+            QMessageBox.warning(
+                self,
+                "开发模式",
+                "开发模式下不支持自动重启，请手动启动程序\n\n"
+                "配置已更新，下次启动时将使用新的数据路径。"
+            )
+            # 退出当前实例
+            self._quitting = True
+            QApplication.quit()
+            return
+        
+        # 启动新实例（仅在 EXE 环境下执行）
+        try:
+            logger.info(f"重启应用: {startup_command}")
+            # EXE 环境：使用 DETACHED_PROCESS 让新进程独立运行
+            subprocess.Popen(
+                startup_command,
+                shell=True,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        except Exception as e:
+            logger.error(f"重启应用失败: {e}")
+        
+        # 退出当前实例
+        self._quitting = True
         QApplication.quit()
     
     def closeEvent(self, event):

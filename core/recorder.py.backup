@@ -99,8 +99,7 @@ class ScreenRecorder:
         
         start_time = datetime.now()
         self._recording_start_time = start_time  # 记录本次录制开始时间
-        self._prev_chunk_end_time = None  # 重置上一个切片结束时间，确保第一张切片使用录制开始时间
-        logger.info(f"开始屏幕录制... (显示器 output_idx={self.output_idx}), _prev_chunk_end_time已重置为None")
+        logger.info(f"开始屏幕录制... (显示器 output_idx={self.output_idx})")
         
         # 初始化 dxcam（带降级重试，避免部分机器/显示器组合直接灾难性失败）
         self._camera = self._create_camera_with_fallback()
@@ -109,7 +108,23 @@ class ScreenRecorder:
         self._paused = False
         self._stop_event.clear()
         
-        # 注意：不再启动活跃度感知，因为休息检测器现在由RecordingManager统一管理
+        # 启动活跃度感知
+        if self._enable_auto_pause:
+            self._auto_pause_recorder = SmartAutoPauseRecorder(
+                self,
+                stop_check_interval=config.STOP_CHECK_INTERVAL,
+                stop_detection_duration=config.STOP_DETECTION_DURATION,
+                resume_wait_duration=config.RESUME_WAIT_DURATION,
+                resume_detection_duration=config.RESUME_DETECTION_DURATION,
+                storage=self._storage,
+                on_stop_recording=self.on_stop_recording,
+                on_resume_recording=self.on_resume_recording
+            )
+            if self._auto_pause_recorder.start():
+                logger.info(f"智能自动暂停录制已启用")
+            else:
+                logger.warning("智能自动暂停录制启动失败，将使用普通录制模式")
+                self._auto_pause_recorder = None
         
         # 启动录制线程
         self._record_thread = threading.Thread(target=self._recording_loop, daemon=True)
@@ -125,24 +140,22 @@ class ScreenRecorder:
             return None
         
         logger.info("停止屏幕录制...")
-        stop_time = self._stop_recording_without_pause_detector()
+        stop_time = self._stop_recording_only()
         logger.info("录制已停止")
         return stop_time
 
-    def _stop_recording_without_pause_detector(self):
-        """内部方法：仅停止视频录制（不停止休息检测器），返回停止时间
-        
-        此方法用于RecordingManager管理休息检测器时，只停止视频录制，
-        而不停止休息检测器，这样休息检测器可以继续检测用户是否结束休息
-        """
+    def _stop_recording_only(self):
+        """内部方法：仅停止录制（不进行分析），返回停止时间"""
         # 首先记录停止时间（这是最精确的停止时间）
         stop_time = datetime.now()
-        logger.info(f"停止录制，停止时间={stop_time.strftime('%H:%M:%S')}, 当前_prev_chunk_end_time={self._prev_chunk_end_time.strftime('%H:%M:%S') if self._prev_chunk_end_time else 'None'}")
         
         self._stop_event.set()
         self._recording = False
         
-        # 注意：不停止活跃度感知（休息检测器），因为它由RecordingManager统一管理
+        # 停止活跃度感知
+        if self._auto_pause_recorder:
+            self._auto_pause_recorder.stop()
+            self._auto_pause_recorder = None
         
         # 等待录制线程结束（缩短超时时间）
         if self._record_thread and self._record_thread.is_alive():
@@ -180,9 +193,6 @@ class ScreenRecorder:
         if self._recording and not self._paused:
             self._paused = True
             logger.info("录制已暂停")
-            
-            # 暂停时完成当前切片，避免数据丢失
-            self._finalize_current_chunk()
     
     def resume(self):
         """恢复录制"""
@@ -309,9 +319,6 @@ class ScreenRecorder:
     
     def _should_create_new_chunk(self) -> bool:
         """检查是否需要创建新切片"""
-        if self._paused:
-            return False
-        
         if self._current_chunk_start is None:
             return True
         
@@ -324,13 +331,10 @@ class ScreenRecorder:
         # 如果是第一个切片，使用录制开始时间（确保与休息卡片结束时间一致）
         if self._prev_chunk_end_time is not None:
             timestamp = self._prev_chunk_end_time
-            logger.debug(f"使用_prev_chunk_end_time作为切片开始时间: {timestamp.strftime('%H:%M:%S')}")
         elif self._recording_start_time is not None:
             timestamp = self._recording_start_time
-            logger.debug(f"使用_recording_start_time作为切片开始时间: {timestamp.strftime('%H:%M:%S')}")
         else:
             timestamp = datetime.now()
-            logger.debug(f"使用当前时间作为切片开始时间: {timestamp.strftime('%H:%M:%S')}")
         
         filename = f"chunk_{timestamp.strftime('%Y%m%d_%H%M%S')}.mp4"
         self._current_chunk_path = self.output_dir / filename
@@ -387,7 +391,6 @@ class ScreenRecorder:
             
             # 记录结束时间供下一个切片使用
             self._prev_chunk_end_time = chunk_end_time
-            logger.debug(f"更新_prev_chunk_end_time={chunk_end_time.strftime('%H:%M:%S')}")
             
             # 创建切片对象
             chunk = VideoChunk(
@@ -418,7 +421,7 @@ class ScreenRecorder:
 class RecordingManager:
     """
     录制管理器
-    整合录制器、休息检测器和数据库存储
+    整合录制器和数据库存储
     """
     
     def __init__(self, storage_manager=None, scheduler=None):
@@ -433,103 +436,25 @@ class RecordingManager:
             on_chunk_saved=self._on_chunk_saved,
             output_idx=output_idx,
             storage=self.storage,
-            enable_auto_pause=False  # 不在ScreenRecorder中启用，由RecordingManager统一管理
+            on_stop_recording=self.stop_recording_and_analyze,
+            on_resume_recording=self.resume_recording
         )
-        
-        # 休息检测器（由RecordingManager统一管理，与录制器分离）
-        self._auto_pause_recorder: Optional[SmartAutoPauseRecorder] = None
-        self._enable_auto_pause = config.ENABLE_AUTO_PAUSE
-        
-        # 分析调度器的原始启动状态（用于恢复）
-        self._scheduler_was_running = False
     
     def _on_chunk_saved(self, chunk: VideoChunk):
         """切片保存回调 - 写入数据库"""
         try:
             chunk_id = self.storage.save_chunk(chunk)
-            logger.info(f"切片已入库: ID={chunk_id}, 开始时间={chunk.start_time.strftime('%H:%M:%S')}, 结束时间={chunk.end_time.strftime('%H:%M:%S')}, 时长={chunk.duration_seconds:.1f}秒")
+            logger.info(f"切片已入库: ID={chunk_id}")
             
             # 立即触发分析调度器扫描，无需等待定时间隔
             if self.scheduler:
-                logger.debug(f"触发分析调度器扫描（切片ID={chunk_id}）")
                 self.scheduler.trigger_scan()
         except Exception as e:
             logger.error(f"切片入库失败: {e}")
     
     def start_recording(self):
-        """开始录制
-        
-        这是一个可复用的方法，用于：
-        1. 检查是否有未分析的视频（警告）
-        2. 检查最后一张活动卡片是否为休息卡片，更新其结束时间
-        3. 启动视频录制
-        4. 启动休息检测器（如果启用）
-        
-        返回:
-            datetime: 录制开始时间
-        """
-        logger.info("========== RecordingManager: start_recording ==========")
-        logger.info("开始录制...")
-        
-        # 1. 检查是否有未分析的视频
-        pending_chunks = self.storage.get_pending_chunks()
-        if pending_chunks:
-            logger.warning(f"发现 {len(pending_chunks)} 个未分析的视频切片！在开始录制时应该处于全部视频分析完成的状态")
-        
-        # 2. 检查最后一张活动卡片是否为休息卡片，更新其结束时间
-        from datetime import datetime
-        now = datetime.now()
-        latest_cards = self.storage.get_cards_before_time(now, limit=1)
-        if latest_cards:
-            latest_card = latest_cards[0]
-            if latest_card.category == "rest":
-                logger.info(f"最后一张卡片是休息卡片，将更新其结束时间为录制开始时间")
-                success = self.storage.update_card(
-                    latest_card.id,
-                    end_time=now
-                )
-                if success:
-                    logger.info(f"已更新休息卡片 {latest_card.id} 的结束时间: {now.strftime('%H:%M:%S')}")
-                else:
-                    logger.error(f"更新休息卡片 {latest_card.id} 失败")
-        
-        # 3. 启动视频录制
-        start_time = self.recorder.start()
-        logger.info(f"recorder.start()返回: {start_time.strftime('%H:%M:%S') if start_time else 'None'}")
-        
-        # 保存录制开始时间到设置中，用于第一张卡片的时间设置
-        if start_time:
-            self.storage.set_setting("recording_start_time", start_time.isoformat())
-            logger.info(f"已保存录制开始时间到设置: {start_time.strftime('%H:%M:%S')}")
-        
-        # 4. 启动分析调度器（强绑定：录制开始时启动分析）
-        if self.scheduler and not self.scheduler.is_running:
-            self._scheduler_was_running = False  # 记录原始状态为未运行
-            self.scheduler.start()
-            logger.info("分析调度器已启动（录制-分析强绑定）")
-        elif self.scheduler and self.scheduler.is_running:
-            self._scheduler_was_running = True  # 记录原始状态为已运行
-            logger.info("分析调度器已在运行（录制-分析强绑定）")
-        
-        # 5. 启动休息检测器（与录制器分离管理）
-        if self._enable_auto_pause:
-            self._auto_pause_recorder = SmartAutoPauseRecorder(
-                self.recorder,
-                stop_check_interval=config.STOP_CHECK_INTERVAL,
-                stop_detection_duration=config.STOP_DETECTION_DURATION,
-                resume_wait_duration=config.RESUME_WAIT_DURATION,
-                resume_detection_duration=config.RESUME_DETECTION_DURATION,
-                storage=self.storage,
-                on_stop_recording=self.stop_recording_and_analyze,
-                on_resume_recording=self.resume_recording
-            )
-            if self._auto_pause_recorder.start():
-                logger.info("休息检测器已启动")
-            else:
-                logger.warning("休息检测器启动失败，将使用普通录制模式")
-                self._auto_pause_recorder = None
-        
-        return start_time
+        """开始录制"""
+        self.recorder.start()
     
     def stop_recording(self):
         """停止录制"""
@@ -538,44 +463,11 @@ class RecordingManager:
     def resume_recording(self):
         """恢复录制（重新启动录制）
         
-        这是一个可复用的方法，用于：
-        1. 检查是否有未分析的视频（警告）
-        2. 检查最后一张活动卡片是否为休息卡片，更新其结束时间
-        3. 启动视频录制
-        4. 不启动休息检测器（因为它已经在运行）
-        
         返回:
             datetime: 录制开始时间
         """
-        logger.info("========== RecordingManager: resume_recording ==========")
         logger.info("重新启动录制...")
-        
-        # 1. 检查是否有未分析的视频
-        pending_chunks = self.storage.get_pending_chunks()
-        if pending_chunks:
-            logger.warning(f"发现 {len(pending_chunks)} 个未分析的视频切片！在恢复录制时应该处于全部视频分析完成的状态")
-        
-        # 2. 检查最后一张活动卡片是否为休息卡片，更新其结束时间
-        from datetime import datetime
-        now = datetime.now()
-        latest_cards = self.storage.get_cards_before_time(now, limit=1)
-        if latest_cards:
-            latest_card = latest_cards[0]
-            if latest_card.category == "rest":
-                logger.info(f"最后一张卡片是休息卡片，将更新其结束时间为录制开始时间")
-                success = self.storage.update_card(
-                    latest_card.id,
-                    end_time=now
-                )
-                if success:
-                    logger.info(f"已更新休息卡片 {latest_card.id} 的结束时间: {now.strftime('%H:%M:%S')}")
-                else:
-                    logger.error(f"更新休息卡片 {latest_card.id} 失败")
-        
-        # 3. 启动视频录制，不启动休息检测器（因为它已经在运行）
-        start_time = self.recorder.start()
-        logger.info(f"recorder.start()返回: {start_time.strftime('%H:%M:%S') if start_time else 'None'}")
-        return start_time
+        return self.recorder.start()
 
     def stop_recording_and_analyze(self):
         """停止录制并分析所有视频
@@ -584,7 +476,6 @@ class RecordingManager:
         1. 停止视频录制
         2. 保存当前切片
         3. 立即分析所有视频，生成活动卡片
-        4. 注意：不停止休息检测器，让它继续检测用户是否结束休息
         
         此方法可在以下场景调用：
         - 用户点击"停止追踪"按钮
@@ -597,91 +488,31 @@ class RecordingManager:
             logger.warning("录制未在进行中，跳过停止")
             return None
         
-        logger.info("========== stop_recording_and_analyze: 开始 ==========")
+        logger.info("停止录制并分析视频...")
         
         # 1. 停止录制（保存当前切片），获取停止时间
-        # 注意：只停止视频录制，不停止休息检测器
-        logger.info("========== step 1: 停止录制 ==========")
-        stop_time = self.recorder._stop_recording_without_pause_detector()
-        logger.info(f"录制已停止，停止时间：{stop_time.strftime('%H:%M:%S')}")
+        stop_time = self.recorder._stop_recording_only()
         
         # 2. 分析所有剩余的视频切片
-        logger.info("========== step 2: 分析所有剩余视频切片 ==========")
+        if self.scheduler:
+            try:
+                logger.info("开始分析所有剩余视频切片...")
+                self.scheduler.analyze_remaining_chunks()
+                logger.info("所有视频切片分析完成")
+            except Exception as e:
+                logger.error(f"分析视频切片失败: {e}")
+        else:
+            logger.warning("分析调度器未启动，无法分析视频切片")
         
-        # 如果 scheduler 未启动，临时创建一个实例来分析剩余切片
-        scheduler = self.scheduler
-        if scheduler is None:
-            logger.info("分析调度器未启动，临时创建 AnalysisScheduler 实例来分析剩余切片")
-            from core.analysis import AnalysisScheduler
-            scheduler = AnalysisScheduler(storage=self.storage)
-        
-        try:
-            logger.info("调用 scheduler.analyze_remaining_chunks()...")
-            scheduler.analyze_remaining_chunks()
-            logger.info("========== 所有视频切片分析完成 ==========")
-        except Exception as e:
-            logger.error(f"分析视频切片失败: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-        
-        # 3. 检查最后一张活动卡片的时间等于停止录制的时间
-        if stop_time:
-            logger.info("========== step 3: 验证最后一张卡片时间 ==========")
-            from datetime import timedelta
-            latest_cards = self.storage.get_cards_before_time(stop_time + timedelta(seconds=1), limit=1)
-            if latest_cards:
-                latest_card = latest_cards[0]
-                card_end_time = latest_card._next_card_start_time if latest_card._next_card_start_time else latest_card.start_time
-                
-                time_diff = abs((stop_time - card_end_time).total_seconds())
-                logger.info(f"最后一张卡片: {latest_card.title}, 结束时间: {card_end_time.strftime('%H:%M:%S')}")
-                logger.info(f"录制停止时间: {stop_time.strftime('%H:%M:%S')}, 时间差: {time_diff:.1f}秒")
-                
-                if time_diff > 5:
-                    logger.warning(f"最后一张卡片的结束时间与录制停止时间不一致（相差{time_diff:.1f}秒），可能需要手动调整")
-                else:
-                    logger.info("最后一张卡片的结束时间与录制停止时间一致")
-            else:
-                logger.warning("未找到最后一张活动卡片")
-        
-        return stop_time
-    
-    def stop_tracking(self):
-        """停止追踪（完全停止录制、休息检测和分析调度器）
-        
-        这是用户点击"停止追踪"按钮时调用的方法：
-        1. 停止视频录制
-        2. 停止休息检测器
-        3. 分析所有视频（等待分析完成）
-        4. 停止分析调度器（如果是由此方法启动的）
-        
-        返回:
-            datetime: 录制停止时间
-        """
-        logger.info("========== 停止追踪开始 ==========")
-        
-        # 1. 停止休息检测器
-        if self._auto_pause_recorder:
-            self._auto_pause_recorder.stop()
-            self._auto_pause_recorder = None
-            logger.info("休息检测器已停止")
-        
-        # 2. 停止录制并分析（等待所有分析完成）
-        stop_time = self.stop_recording_and_analyze()
-        
-        # 3. 停止分析调度器（强绑定：录制停止时停止分析，但要等分析完成）
-        if self.scheduler and self.scheduler.is_running and not self._scheduler_was_running:
-            self.scheduler.stop()
-            logger.info("分析调度器已停止（录制-分析强绑定）")
-        elif self.scheduler and self.scheduler.is_running:
-            logger.info("分析调度器继续运行（录制-分析强绑定：恢复到原始状态）")
-        
-        logger.info(f"========== 停止追踪完成，停止时间：{stop_time.strftime('%H:%M:%S') if stop_time else 'None'} ==========")
         return stop_time
 
     def pause_recording(self):
         """暂停录制"""
         self.recorder.pause()
+    
+    def resume_recording(self):
+        """恢复录制"""
+        self.recorder.resume()
     
     @property
     def is_recording(self) -> bool:

@@ -13,7 +13,8 @@ import config
 from core.types import (
     VideoChunk, ChunkStatus,
     AnalysisBatch, BatchStatus,
-    Observation, ActivityCard
+    Observation, ActivityCard,
+    AppSite
 )
 from core.llm_provider import DayflowBackendProvider
 from database.storage import StorageManager
@@ -244,6 +245,8 @@ class AnalysisScheduler:
             # 转录所有切片
             all_observations = []
             chunk_card_start_times = {}  # 存储每个切片的卡片开始时间
+            all_window_records = []  # 存储所有窗口记录，用于计算app_sites时长
+            
             for chunk in chunks:
                 if not Path(chunk.file_path).exists():
                     logger.warning(f"切片文件不存在: {chunk.file_path}")
@@ -282,6 +285,10 @@ class AnalysisScheduler:
                     window_records=window_records
                 )
                 
+                # 保存窗口记录用于后续计算app_sites时长
+                if window_records:
+                    all_window_records.extend(window_records)
+                
                 # 调整时间戳（相对于批次开始时间）
                 if chunk.start_time and batch.start_time:
                     offset = (chunk.start_time - batch.start_time).total_seconds()
@@ -313,127 +320,123 @@ class AnalysisScheduler:
                 start_time=batch.start_time
             )
             
-            # 验证并修复卡片时间连续性（AI已经重试过，但这里再做一次最终检查）
-            self._validate_and_fix_card_continuity(cards)
+            # 设置卡片开始时间和结束时间
+            # 第一张卡片的开始时间 = 录制开始时间（仅当数据库中没有任何卡片时）
+            # 其他卡片的开始时间 = 上一张卡片的结束时间
+            # 每张卡片的结束时间 = 批次开始时间 + AI返回的相对时间（最后一张卡片使用chunk结束时间）
             
-            # 保存卡片（处理合并逻辑）
-            # context_cards 是升序排列的，所以最后一张卡片就是最近的一张
-            previous_card = context_cards[-1] if context_cards else None
-            for idx, card in enumerate(cards):
-                # 设置卡片开始时间：使用窗口记录中的时间（视频录制时间点）
-                # 不再使用AI推断的开始时间，确保开始时间的准确性
-                if chunk_card_start_times and idx < len(chunks):
-                    chunk = chunks[idx]
-                    if chunk.id in chunk_card_start_times:
-                        card.start_time = chunk_card_start_times[chunk.id]
-                        logger.debug(f"设置卡片开始时间为窗口记录中的时间: {card.start_time} (chunk_id={chunk.id})")
-                    else:
-                        # 如果没有窗口记录，使用chunk的开始时间
-                        if chunk.start_time:
-                            card.start_time = chunk.start_time
-                            logger.debug(f"设置卡片开始时间为chunk开始时间: {card.start_time} (chunk_id={chunk.id})")
-                elif idx < len(chunks) and chunks[idx].start_time:
-                    # 兜底：使用chunk的开始时间
-                    card.start_time = chunks[idx].start_time
-                    logger.debug(f"设置卡片开始时间为chunk开始时间: {card.start_time}")
-                
-                # 将结束时间的相对时间转换为绝对时间
-                if batch.start_time and card._next_card_start_time is None and hasattr(card, '_relative_end') and card._relative_end is not None:
-                    card._next_card_start_time = batch.start_time + timedelta(seconds=card._relative_end)
-                    logger.debug(f"设置卡片结束时间（从相对时间转换）: {card._relative_end}s -> {card._next_card_start_time}")
-                
-                # 设置卡片结束时间（按优先级）
-                if card._next_card_start_time is None:
-                    # 如果AI没有返回结束时间，根据卡片位置设置
-                    if idx < len(cards) - 1:
-                        # 非最后一张卡片：使用下一张卡片的开始时间
-                        if cards[idx + 1].start_time:
-                            card._next_card_start_time = cards[idx + 1].start_time
-                            logger.debug(f"设置卡片结束时间为下一张卡片的开始时间: {card._next_card_start_time}")
-                    elif idx == len(cards) - 1:
-                        # 最后一张卡片：使用批次的结束时间或最后一个chunk的结束时间
-                        if batch.end_time:
-                            card._next_card_start_time = batch.end_time
-                            logger.debug(f"设置最后一张卡片结束时间为批次结束时间: {card._next_card_start_time}")
-                        elif chunks and chunks[-1].end_time:
-                            card._next_card_start_time = chunks[-1].end_time
-                            logger.debug(f"设置最后一张卡片结束时间为最后一个chunk的结束时间: {card._next_card_start_time}")
-                else:
-                    logger.debug(f"使用AI返回的卡片结束时间: {card._next_card_start_time}")
-                
-                # 验证卡片时间是否合理
-                if card.start_time and card._next_card_start_time:
-                    if card.start_time >= card._next_card_start_time:
-                        logger.warning(f"卡片时间不合理：开始时间 {card.start_time} >= 结束时间 {card._next_card_start_time}，跳过此卡片")
-                        continue
-                    
-                    duration = (card._next_card_start_time - card.start_time).total_seconds() / 60
-                    if duration < 0.1:  # 小于6秒
-                        logger.warning(f"卡片持续时间过短：{duration:.2f}分钟，跳过此卡片")
-                        continue
-                    
-                    logger.debug(f"卡片时间验证通过：{card.title} ({duration:.1f}分钟)")
-                
-                # 检查是否需要合并到上一张卡片
-                if card._merge_with_previous and previous_card:
-                    # 合并：更新上一张卡片的描述和结束时间
-                    if card._updated_summary:
-                        # 验证时间合理性：新的结束时间应该大于上一张卡片的开始时间
-                        if previous_card.start_time and card._next_card_start_time:
-                            if card._next_card_start_time > previous_card.start_time:
-                                self.storage.update_card(
-                                    previous_card.id,
-                                    summary=card._updated_summary,
-                                    end_time=card._next_card_start_time
-                                )
-                                # 计算合并后的持续时间
-                                new_duration = (card._next_card_start_time - previous_card.start_time).total_seconds() / 60
-                                logger.info(f"合并卡片到上一张卡片 {previous_card.id}: {previous_card.title} (新持续时间: {new_duration:.1f}分钟)")
-                            else:
-                                logger.warning(f"跳过合并：新结束时间 {card._next_card_start_time} 不大于开始时间 {previous_card.start_time}")
-                                # 如果时间不合理，就作为新卡片保存
-                                self.storage.save_card(card, batch_id)
-                                previous_card = card
+            # 检查是否是全局第一张卡片（数据库中没有任何卡片）
+            recent_cards = self.storage.get_recent_cards(limit=1)
+            is_first_card = len(recent_cards) == 0
+            
+            if is_first_card:
+                # 第一张卡片：使用录制开始时间
+                recording_start_time_str = self.storage.get_setting("recording_start_time", "")
+                if recording_start_time_str:
+                    try:
+                        current_card_start_time = datetime.fromisoformat(recording_start_time_str)
+                        logger.info(f"全局第一张卡片：使用录制开始时间 {current_card_start_time}")
+                    except Exception as e:
+                        logger.warning(f"解析录制开始时间失败: {e}，使用批次开始时间")
+                        if batch.start_time:
+                            current_card_start_time = batch.start_time
                         else:
-                            logger.warning(f"跳过合并：缺少时间信息")
-                            # 如果时间信息不完整，就作为新卡片保存
-                            self.storage.save_card(card, batch_id)
-                            previous_card = card
+                            logger.error("无法确定第一张卡片的开始时间，跳过此批次")
+                            self.storage.update_batch(batch_id, BatchStatus.COMPLETED, "[]")
+                            return
+                elif batch.start_time:
+                    current_card_start_time = batch.start_time
+                    logger.info(f"全局第一张卡片：使用批次开始时间 {current_card_start_time}")
                 else:
-                    # 新增：正常保存卡片
-                    self.storage.save_card(card, batch_id)
-                    previous_card = card
+                    logger.error("无法确定第一张卡片的开始时间，跳过此批次")
+                    self.storage.update_batch(batch_id, BatchStatus.COMPLETED, "[]")
+                    return
+            else:
+                # 非第一张卡片：使用前一张卡片的结束时间
+                last_card = recent_cards[-1]
+                if last_card.end_time:
+                    current_card_start_time = last_card.end_time
+                    logger.info(f"非第一张卡片：使用前一张卡片的结束时间 {current_card_start_time}")
+                elif batch.start_time:
+                    current_card_start_time = batch.start_time
+                    logger.warning(f"前一张卡片无结束时间，使用批次开始时间 {current_card_start_time}")
+                else:
+                    logger.error("无法确定卡片开始时间，跳过此批次")
+                    self.storage.update_batch(batch_id, BatchStatus.COMPLETED, "[]")
+                    return
             
-            # 检查倒数第二张卡片的结束时间是否早于最后一张卡片的开始时间
-            if len(cards) >= 2:
-                second_last_card = cards[-2]
-                last_card = cards[-1]
+            # 设置每张卡片的开始时间和结束时间
+            for idx, card in enumerate(cards):
+                # 设置卡片开始时间
+                card.start_time = current_card_start_time
+                logger.debug(f"卡片 {idx + 1} 开始时间: {card.start_time}")
                 
-                # 检查倒数第二张卡片是否有ID（已保存）
-                if second_last_card.id and last_card.start_time and second_last_card._next_card_start_time:
-                    if second_last_card._next_card_start_time > last_card.start_time:
-                        # 倒数第二张卡片的结束时间晚于最后一张卡片的开始时间，需要修正
-                        logger.warning(
-                            f"倒数第二张卡片 {second_last_card.id} 的结束时间 {second_last_card._next_card_start_time} "
-                            f"晚于最后一张卡片的开始时间 {last_card.start_time}，修正结束时间"
+                # 设置卡片结束时间
+                if hasattr(card, '_relative_end') and card._relative_end is not None:
+                    # AI返回了相对时间
+                    if idx < len(cards) - 1:
+                        # 非最后一张卡片：使用AI返回的相对时间
+                        card._next_card_start_time = batch.start_time + timedelta(seconds=card._relative_end)
+                        logger.debug(f"卡片 {idx + 1} 结束时间（从AI相对时间转换）: {card._relative_end}s -> {card._next_card_start_time}")
+                    else:
+                        # 最后一张卡片：强制使用最后一个chunk的结束时间（等于录制停止时间）
+                        if chunks and chunks[-1].end_time:
+                            card._next_card_start_time = chunks[-1].end_time
+                            logger.debug(f"最后一张卡片：使用chunk结束时间 {card._next_card_start_time}（忽略AI相对时间 {card._relative_end}s）")
+                        elif batch.end_time:
+                            card._next_card_start_time = batch.end_time
+                            logger.debug(f"最后一张卡片：使用批次结束时间 {card._next_card_start_time}（忽略AI相对时间 {card._relative_end}s）")
+                        else:
+                            logger.warning(f"最后一张卡片：无法确定结束时间，使用AI相对时间 {card._relative_end}s")
+                            card._next_card_start_time = batch.start_time + timedelta(seconds=card._relative_end)
+                else:
+                    # AI没有返回相对时间，跳过此卡片
+                    logger.warning(f"卡片 {idx + 1}：AI未返回结束时间，跳过此卡片")
+                    continue
+                
+                # 为下一张卡片更新开始时间
+                current_card_start_time = card._next_card_start_time
+            
+            # 根据窗口记录精确计算每张卡片的app_sites时长
+            if all_window_records and batch.start_time:
+                for idx, card in enumerate(cards):
+                    if card.start_time and card._next_card_start_time:
+                        app_durations = self._calculate_app_durations(
+                            all_window_records, 
+                            card.start_time, 
+                            card._next_card_start_time,
+                            batch.start_time
                         )
                         
-                        # 更新倒数第二张卡片的结束时间为最后一张卡片的开始时间
-                        success = self.storage.update_card(
-                            second_last_card.id,
-                            end_time=last_card.start_time
-                        )
+                        # 更新卡片的app_sites
+                        updated_app_sites = []
+                        for app_site in card.app_sites:
+                            app_name = app_site.name
+                            duration = app_durations.get(app_name, 0)
+                            updated_app_sites.append(AppSite(
+                                name=app_name,
+                                duration_seconds=duration
+                            ))
                         
-                        if success:
-                            # 计算修正后的持续时间
-                            corrected_duration = (last_card.start_time - second_last_card.start_time).total_seconds() / 60
-                            logger.info(
-                                f"已修正卡片 {second_last_card.id} ({second_last_card.title}) 的结束时间: "
-                                f"{second_last_card._next_card_start_time} -> {last_card.start_time} "
-                                f"(持续时间: {corrected_duration:.1f}分钟)"
-                            )
-                            # 更新内存中的结束时间
-                            second_last_card._next_card_start_time = last_card.start_time
+                        card.app_sites = updated_app_sites
+                        logger.debug(f"卡片 {idx + 1} 应用时长计算完成: {app_durations}")
+            
+            # 验证卡片时间连续性
+            valid_cards = []
+            for idx, card in enumerate(cards):
+                if not card.start_time or not card._next_card_start_time:
+                    logger.warning(f"卡片 {idx + 1} 时间信息不完整（start_time={card.start_time}, end_time={card._next_card_start_time}），跳过此卡片")
+                    continue
+                if card._next_card_start_time <= card.start_time:
+                    logger.warning(f"卡片 {idx + 1} 时间不合理（开始时间 {card.start_time} >= 结束时间 {card._next_card_start_time}），跳过此卡片")
+                    continue
+                valid_cards.append(card)
+            
+            logger.info(f"卡片时间验证通过：{len(valid_cards)}/{len(cards)} 张卡片")
+            
+            # 保存有效卡片
+            for card in valid_cards:
+                self.storage.save_card(card, batch_id)
             
             # 更新状态
             import json
@@ -444,7 +447,7 @@ class AnalysisScheduler:
                 if chunk.id:
                     self.storage.update_chunk_status(chunk.id, ChunkStatus.COMPLETED)
             
-            logger.info(f"批次 {batch_id} 处理完成 - 生成 {len(cards)} 张卡片")
+            logger.info(f"批次 {batch_id} 处理完成 - 生成 {len(valid_cards)} 张卡片")
             
             # 分析完成后删除视频切片文件（节省磁盘空间）
             if config.AUTO_DELETE_ANALYZED_CHUNKS:
@@ -461,25 +464,62 @@ class AnalysisScheduler:
             
             raise
     
-    def _validate_and_fix_card_continuity(self, cards: List[ActivityCard]) -> None:
+    def _validate_and_fix_card_continuity(self, cards: List[ActivityCard], previous_card: Optional[ActivityCard] = None) -> None:
         """
         验证并修复卡片时间连续性
         
         验证规则：
         1. 每张卡片的结束时间必须晚于开始时间
         2. 每张卡片的结束时间必须早于或等于下一张卡片的开始时间
+        3. 当前批次的第一张卡片必须与上一批次的最后一张卡片保持时间连续性
         
         修复规则：
         - 如果卡片结束时间 > 下一张卡片的开始时间，将结束时间修正为下一张卡片的开始时间
         - 如果卡片结束时间 <= 开始时间，删除该卡片（记录警告）
+        - 如果上一张卡片的结束时间 > 当前卡片的开始时间，更新上一张卡片的结束时间
         
         Args:
             cards: 待验证和修复的卡片列表（会被原地修改）
+            previous_card: 上一批次的最后一张卡片，用于验证批次边界的时间连续性
         """
         if not cards:
             return
         
         cards_to_remove = []
+        
+        # 验证当前批次的第一张卡片与上一批次最后一张卡片的连续性
+        if previous_card and cards and len(cards) > 0:
+            first_card = cards[0]
+            
+            # 检查previous_card的结束时间是否已设置
+            if previous_card._next_card_start_time and first_card.start_time:
+                if previous_card._next_card_start_time > first_card.start_time:
+                    # 上一张卡片的结束时间晚于当前卡片的开始时间，存在时间重叠
+                    logger.warning(
+                        f"批次边界时间重叠：上一张卡片 ({previous_card.title}) 的结束时间 {previous_card._next_card_start_time} "
+                        f"晚于当前批次第一张卡片 ({first_card.title}) 的开始时间 {first_card.start_time}，修正上一张卡片的结束时间"
+                    )
+                    
+                    # 更新上一张卡片的结束时间
+                    old_end_time = previous_card._next_card_start_time
+                    previous_card._next_card_start_time = first_card.start_time
+                    
+                    # 计算修正后的持续时间
+                    corrected_duration = (previous_card._next_card_start_time - previous_card.start_time).total_seconds() / 60
+                    logger.info(
+                        f"已修正上一张卡片 {previous_card.id} ({previous_card.title}) 的结束时间: "
+                        f"{old_end_time} -> {previous_card._next_card_start_time} "
+                        f"(持续时间: {corrected_duration:.1f}分钟)"
+                    )
+                    
+                    # 更新数据库
+                    if previous_card.id:
+                        success = self.storage.update_card(
+                            previous_card.id,
+                            end_time=previous_card._next_card_start_time
+                        )
+                        if not success:
+                            logger.error(f"更新上一张卡片 {previous_card.id} 的结束时间失败")
         
         for i, card in enumerate(cards):
             # 检查卡片的结束时间是否设置
@@ -537,7 +577,7 @@ class AnalysisScheduler:
         此方法不等待凑够15个切片，直接分析所有待分析的切片
         确保录制结束时最后的工作也能被记录
         """
-        logger.info("开始强制分析剩余切片...")
+        logger.info("========== 开始强制分析剩余切片 ==========")
         
         # 获取所有待分析的切片
         pending_chunks = self.storage.get_pending_chunks()
@@ -547,6 +587,10 @@ class AnalysisScheduler:
             return
         
         logger.info(f"发现 {len(pending_chunks)} 个待分析切片，开始强制分析")
+        for i, chunk in enumerate(pending_chunks[:5]):  # 只打印前5个
+            logger.info(f"  切片{i+1}: ID={chunk.id}, 开始={chunk.start_time.strftime('%H:%M:%S')}, 结束={chunk.end_time.strftime('%H:%M:%S')}, 时长={chunk.duration_seconds:.1f}秒")
+        if len(pending_chunks) > 5:
+            logger.info(f"  ... 还有 {len(pending_chunks)-5} 个切片")
         
         # 直接将所有切片作为一个批次处理
         try:
@@ -554,13 +598,95 @@ class AnalysisScheduler:
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(self._process_batch(pending_chunks))
-                logger.info(f"剩余切片分析完成，共处理 {len(pending_chunks)} 个切片")
+                logger.info(f"========== 剩余切片分析完成，共处理 {len(pending_chunks)} 个切片 ==========")
             finally:
                 if not loop.is_closed():
                     loop.close()
         except Exception as e:
             logger.error(f"强制分析剩余切片失败: {e}")
             raise
+    
+    def _calculate_app_durations(
+        self,
+        window_records: List[dict],
+        card_start_time: datetime,
+        card_end_time: datetime,
+        batch_start_time: datetime
+    ) -> dict:
+        """
+        根据窗口记录计算卡片时间范围内每个应用的时长
+        
+        Args:
+            window_records: 窗口记录列表
+            card_start_time: 卡片开始时间
+            card_end_time: 卡片结束时间
+            batch_start_time: 批次开始时间（用于计算相对时间）
+            
+        Returns:
+            dict: 应用名称到时长的映射（单位：秒）
+        """
+        app_durations = {}
+        
+        if not window_records:
+            return app_durations
+        
+        # 计算卡片时间范围（相对于批次开始时间）
+        card_start_offset = (card_start_time - batch_start_time).total_seconds()
+        card_end_offset = (card_end_time - batch_start_time).total_seconds()
+        
+        # 按时间排序窗口记录
+        sorted_records = [r for r in window_records if "app_name" in r or "event" in r]
+        
+        for i in range(len(sorted_records)):
+            current_record = sorted_records[i]
+            
+            # 跳过特殊事件记录
+            if current_record.get("event") in ["card_start", "card_end"]:
+                continue
+            
+            # 获取当前记录的app_name
+            app_name = current_record.get("app_name")
+            if not app_name:
+                continue
+            
+            # 获取当前记录的时间戳
+            current_timestamp = current_record.get("timestamp", 0)
+            
+            # 确定时间窗口的结束时间
+            if i < len(sorted_records) - 1:
+                next_record = sorted_records[i + 1]
+                next_timestamp = next_record.get("timestamp", 0)
+                
+                # 如果下一条是特殊事件，跳到再下一条
+                if next_record.get("event") in ["card_start", "card_end"] and i + 2 < len(sorted_records):
+                    next_record = sorted_records[i + 2]
+                    next_timestamp = next_record.get("timestamp", 0)
+            else:
+                # 最后一条记录，使用批次结束时间
+                next_timestamp = sorted_records[-1].get("timestamp", 0)
+                if next_timestamp <= current_timestamp:
+                    # 如果没有下一条记录的时间戳，假设持续到卡片结束
+                    next_timestamp = card_end_offset
+            
+            # 计算当前记录的持续时间
+            duration = next_timestamp - current_timestamp
+            
+            # 检查时间窗口是否与卡片时间范围有重叠
+            if next_timestamp <= card_start_offset or current_timestamp >= card_end_offset:
+                # 没有重叠，跳过
+                continue
+            
+            # 计算重叠部分
+            overlap_start = max(current_timestamp, card_start_offset)
+            overlap_end = min(next_timestamp, card_end_offset)
+            overlap_duration = max(0, overlap_end - overlap_start)
+            
+            # 累加应用时长
+            if app_name not in app_durations:
+                app_durations[app_name] = 0
+            app_durations[app_name] += overlap_duration
+        
+        return app_durations
     
     def _delete_chunk_files(self, chunks: List[VideoChunk]):
         """

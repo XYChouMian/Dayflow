@@ -41,7 +41,6 @@ CREATE TABLE IF NOT EXISTS timeline_cards (
     start_time TIMESTAMP NOT NULL,
     end_time TIMESTAMP NOT NULL,
     app_sites_json TEXT DEFAULT '[]',  -- JSON array of AppSite objects
-    distractions_json TEXT DEFAULT '[]',  -- JSON array of Distraction objects
     productivity_score REAL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (batch_id) REFERENCES analysis_batches(id)

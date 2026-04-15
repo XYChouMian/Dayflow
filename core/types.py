@@ -82,29 +82,6 @@ class AppSite:
 
 
 @dataclass
-class Distraction:
-    """分心记录"""
-    description: str
-    timestamp: float
-    duration_seconds: float = 0
-    
-    def to_dict(self) -> dict:
-        return {
-            "description": self.description,
-            "timestamp": self.timestamp,
-            "duration_seconds": self.duration_seconds
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "Distraction":
-        return cls(
-            description=data.get("description", ""),
-            timestamp=data.get("timestamp", 0),
-            duration_seconds=data.get("duration_seconds", 0)
-        )
-
-
-@dataclass
 class ActivityCard:
     """
     时间轴活动卡片 - 展示在时间轴上的主要元素
@@ -115,7 +92,6 @@ class ActivityCard:
     summary: str = ""  # 活动摘要
     start_time: Optional[datetime] = None  # 开始时间
     app_sites: List[AppSite] = field(default_factory=list)  # 使用的应用/网站
-    distractions: List[Distraction] = field(default_factory=list)  # 分心记录
     productivity_score: float = 0.0  # 生产力评分 (0-100)
     _next_card_start_time: Optional[datetime] = field(default=None, repr=False)  # 下一个卡片的开始时间（内部使用）
     _merge_with_previous: bool = field(default=False, repr=False)  # 是否合并到上一张卡片
@@ -130,7 +106,6 @@ class ActivityCard:
             "summary": self.summary,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "app_sites": [a.to_dict() for a in self.app_sites],
-            "distractions": [d.to_dict() for d in self.distractions],
             "productivity_score": self.productivity_score
         }
     
@@ -143,7 +118,6 @@ class ActivityCard:
             summary=data.get("summary", ""),
             start_time=datetime.fromisoformat(data["start_time"]) if data.get("start_time") else None,
             app_sites=[AppSite.from_dict(a) for a in data.get("app_sites", [])],
-            distractions=[Distraction.from_dict(d) for d in data.get("distractions", [])],
             productivity_score=data.get("productivity_score", 0.0)
         )
     

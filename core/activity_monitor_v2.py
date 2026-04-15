@@ -499,7 +499,9 @@ class SmartAutoPauseRecorder:
         stop_detection_duration: int = 30,  # 停止检测持续时间（秒）
         resume_wait_duration: int = 30,     # 恢复等待持续时间（秒）
         resume_detection_duration: int = 30,  # 恢复检测持续时间（秒）
-        storage = None                      # 数据存储
+        storage = None,                     # 数据存储
+        on_stop_recording: Optional[Callable[[], None]] = None,  # 停止录制回调函数
+        on_resume_recording: Optional[Callable[[], None]] = None  # 恢复录制回调函数
     ):
         """
         初始化智能自动暂停录制器
@@ -511,12 +513,16 @@ class SmartAutoPauseRecorder:
             resume_wait_duration: 恢复等待持续时间（秒），默认30秒
             resume_detection_duration: 恢复检测持续时间（秒），默认30秒
             storage: 数据存储实例
+            on_stop_recording: 停止录制回调函数
+            on_resume_recording: 恢复录制回调函数
         """
         self.recorder = recorder
         self.stop_check_interval = stop_check_interval
         self.stop_detection_duration = stop_detection_duration
         self.resume_wait_duration = resume_wait_duration
         self.resume_detection_duration = resume_detection_duration
+        self._on_stop_recording = on_stop_recording  # 停止录制回调
+        self._on_resume_recording = on_resume_recording  # 恢复录制回调
         
         # 监听器
         self._mouse_listener: Optional[mouse.Listener] = None
@@ -524,21 +530,25 @@ class SmartAutoPauseRecorder:
         
         # 活动记录
         self._last_activity_time = 0.0
-        self._activity_detected_in_window = False
+        self._activity_events: deque = deque(maxlen=100)  # 保存最近100次活动
         self._monitoring = False
         self._monitor_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         
+        # 休息卡片更新线程
+        self._rest_card_update_thread: Optional[threading.Thread] = None
+        self._rest_card_update_stop_event = threading.Event()
+        self._current_rest_card_id: Optional[int] = None
+        
         # 状态机状态
         # IDLE: 初始状态
-        # STOP_10S_CHECK: 每60秒进入一次，进行10秒检测
-        # STOP_WAIT_60: 10秒内有操作，等待60秒后再次检测
-        # STOP_MONITORING: 10秒内无操作，持续监测，30秒内有操作不停止，50秒无操作停止
-        # STOPPED: 录制停止状态
-        # RESUME_MONITORING: 监测键鼠操作
-        # RESUME_WAIT_30: 检测到操作后等待30秒
-        # RESUME_DETECT_30: 检测30秒，期间有操作开始录制
-        # RESUME_WAIT_10: 30秒内无操作，等待10秒后再次监测
+        # WAIT_FOR_CHECK: 等待60秒后开始检测
+        # CHECK_10S: 进行10秒检测
+        # CHECK_60S: 进行60秒二次检测
+        # STOPPED: 录制停止状态，正在生成休息卡片
+        # REST_MONITORING: 持续检测用户是否操作
+        # REST_WAIT_30: 检测到操作后等待30秒
+        # REST_DETECT_90: 进行90秒检测，确认用户是否结束休息
         self._state = "IDLE"
         self._state_start_time = 0.0
         self._auto_paused = False
@@ -574,172 +584,336 @@ class SmartAutoPauseRecorder:
         
         with self._activity_lock:
             self._last_activity_time = current_time
-            self._activity_detected_in_window = True
+            self._activity_events.append({
+                "time": current_time,
+                "type": activity_type
+            })
             
         logger.debug(f"检测到活动: {activity_type}")
     
-    def _check_recent_activity(self, window_seconds: float) -> bool:
-        """检查最近一段时间内是否有活动"""
+    def _check_activity_since(self, start_time: float) -> bool:
+        """检查从指定时间开始到现在是否有活动"""
         current_time = time.time()
+        
         with self._activity_lock:
-            if self._last_activity_time > 0 and (current_time - self._last_activity_time) <= window_seconds:
-                return True
+            for event in self._activity_events:
+                if event['time'] >= start_time and event['time'] <= current_time:
+                    return True
         return False
     
-    def _reset_activity_window(self):
-        """重置活动检测窗口"""
-        with self._activity_lock:
-            self._activity_detected_in_window = False
-    
     def _state_idle(self):
-        """IDLE状态处理"""
+        """IDLE状态处理：进入等待检测状态"""
         current_time = time.time()
         
-        # 进入停止检测状态
-        logger.info("进入停止检测状态")
-        self._state = "STOP_10S_CHECK"
+        logger.info("进入等待检测状态")
+        self._state = "WAIT_FOR_CHECK"
         self._state_start_time = current_time
-        self._reset_activity_window()
     
-    def _state_stop_10s_check(self):
-        """STOP_10S_CHECK状态处理：进行10秒检测"""
+    def _state_wait_for_check(self):
+        """WAIT_FOR_CHECK状态处理：等待60秒后开始10秒检测"""
         current_time = time.time()
         elapsed = current_time - self._state_start_time
         
-        # 在10秒检测窗口内
-        if elapsed <= 10:
-            # 检查10秒内是否有活动
-            if self._check_recent_activity(10):
-                logger.info(f"10秒检测窗口内检测到活动，用户正在工作，等待60秒后再次检测")
-                self._state = "STOP_WAIT_60"
-                self._state_start_time = current_time
-                return
-        else:
-            # 10秒内无活动，进入持续监测状态
-            logger.info("10秒检测窗口内无活动，进入持续监测状态")
-            self._state = "STOP_MONITORING"
+        if elapsed >= 60:
+            logger.info("60秒等待结束，开始10秒检测")
+            self._state = "CHECK_10S"
             self._state_start_time = current_time
-            self._reset_activity_window()
-            return
-        
-        # 继续检测
-        self._stop_event.wait(0.1)
-    
-    def _state_stop_wait_60(self):
-        """STOP_WAIT_60状态处理：等待60秒后再次进行10秒检测"""
-        current_time = time.time()
-        elapsed = current_time - self._state_start_time
-        
-        # 等待60秒后再次检测
-        if elapsed >= self.stop_check_interval:
-            logger.info("60秒等待结束，再次进行10秒检测")
-            self._state = "STOP_10S_CHECK"
-            self._state_start_time = current_time
-            self._reset_activity_window()
             return
         
         self._stop_event.wait(1)
     
-    def _state_stop_monitoring(self):
-        """STOP_MONITORING状态处理：持续监测"""
+    def _state_check_10s(self):
+        """CHECK_10S状态处理：进行10秒检测"""
         current_time = time.time()
         elapsed = current_time - self._state_start_time
         
-        # 检查是否有活动
-        if elapsed <= 30:
-            # 在30秒检测窗口内，如果有活动则不停止
-            if self._check_recent_activity(1):
-                logger.info(f"持续监测窗口（{elapsed:.0f}秒）内检测到活动，用户仍在工作，等待60秒后再次检测")
-                self._state = "STOP_WAIT_60"
+        if elapsed <= 10:
+            if self._check_activity_since(self._state_start_time):
+                logger.info(f"10秒检测窗口内检测到活动，用户正在工作，等待下次检测")
+                self._state = "WAIT_FOR_CHECK"
                 self._state_start_time = current_time
                 return
         else:
-            # 超过30秒，检查是否达到50秒无操作
-            if elapsed >= 50:
-                logger.info(f"持续监测窗口（{elapsed:.0f}秒）内无活动，停止录制")
-                self._pause_recording()
-                self._state = "STOPPED"
-                self._state_start_time = current_time
-                return
+            logger.info("10秒检测窗口内无活动，进入60秒二次检测")
+            self._state = "CHECK_60S"
+            self._state_start_time = current_time
+            return
+        
+        self._stop_event.wait(0.1)
+    
+    def _state_check_60s(self):
+        """CHECK_60S状态处理：进行60秒二次检测"""
+        current_time = time.time()
+        elapsed = current_time - self._state_start_time
+        
+        if self._check_activity_since(self._state_start_time):
+            logger.info("60秒二次检测期间检测到活动，用户正在工作，回到等待检测状态")
+            self._state = "WAIT_FOR_CHECK"
+            self._state_start_time = current_time
+            return
+        
+        if elapsed >= 60:
+            logger.info("60秒二次检测期间无活动，判定用户正在休息，停止录制")
+            
+            # 调用停止录制回调（停止录制并分析视频），获取停止时间
+            recording_stop_time = None
+            if self._on_stop_recording:
+                logger.info("调用停止录制回调，停止录制并分析视频")
+                try:
+                    recording_stop_time = self._on_stop_recording()
+                except Exception as e:
+                    logger.error(f"停止录制回调执行失败: {e}")
+            
+            # 记录休息开始时间（使用录屏实际停止时间）
+            self._rest_start_time = recording_stop_time if recording_stop_time else datetime.now()
+            logger.info(f"记录休息开始时间: {self._rest_start_time.strftime('%H:%M:%S')}")
+            
+            self._state = "STOPPED"
+            self._state_start_time = current_time
+            return
         
         self._stop_event.wait(0.1)
     
     def _state_stopped(self):
-        """STOPPED状态处理：录制停止状态，进入恢复监测"""
-        current_time = time.time()
+        """STOPPED状态处理：录制停止状态，创建休息卡片并启动更新线程"""
+        logger.info("创建休息卡片并启动更新线程")
         
-        # 进入恢复监测状态
-        logger.info("进入恢复监测状态")
-        self._state = "RESUME_MONITORING"
-        self._state_start_time = current_time
-        self._reset_activity_window()
+        rest_card = self._create_rest_card()
+        if rest_card:
+            self._start_rest_card_update_thread()
+        
+        self._auto_paused = True
+        logger.info("设置自动暂停状态为 True，UI 应显示'检测到用户正在休息'")
+        
+        self._state = "REST_MONITORING"
+        self._state_start_time = time.time()
     
-    def _state_resume_monitoring(self):
-        """RESUME_MONITORING状态处理：监测键鼠操作"""
+    def _state_rest_monitoring(self):
+        """REST_MONITORING状态处理：持续检测用户是否操作"""
         current_time = time.time()
         
-        # 检测是否有活动
-        if self._check_recent_activity(1):
-            logger.info("检测到键鼠操作，等待30秒后开始检测")
-            self._state = "RESUME_WAIT_30"
-            self._state_start_time = current_time
-            self._reset_activity_window()
-            return
-        
-        self._stop_event.wait(0.1)
-    
-    def _state_resume_wait_30(self):
-        """RESUME_WAIT_30状态处理：等待30秒后开始检测"""
-        current_time = time.time()
-        elapsed = current_time - self._state_start_time
-        
-        # 等待30秒
-        if elapsed >= self.resume_wait_duration:
-            logger.info("30秒等待结束，开始30秒检测")
-            self._state = "RESUME_DETECT_30"
-            self._state_start_time = current_time
-            self._reset_activity_window()
-            return
-        
-        self._stop_event.wait(1)
-    
-    def _state_resume_detect_30(self):
-        """RESUME_DETECT_30状态处理：检测30秒，期间有操作开始录制"""
-        current_time = time.time()
-        elapsed = current_time - self._state_start_time
-        
-        # 在30秒检测窗口内
-        if elapsed <= self.resume_detection_duration:
-            # 检测是否有活动
-            if self._check_recent_activity(1):
-                logger.info(f"检测窗口（{elapsed:.0f}秒）内检测到活动，用户开始工作，开始录制")
-                self._resume_recording()
-                self._state = "IDLE"
-                self._state_start_time = current_time
-                return
-        else:
-            # 30秒内无活动，等待10秒后再次监测
-            logger.info("30秒检测窗口内无活动，等待10秒后再次监测")
-            self._state = "RESUME_WAIT_10"
+        if self._check_activity_since(self._state_start_time):
+            logger.info("检测到用户操作，可能结束休息，等待30秒")
+            self._state = "REST_WAIT_30"
             self._state_start_time = current_time
             return
         
         self._stop_event.wait(0.1)
     
-    def _state_resume_wait_10(self):
-        """RESUME_WAIT_10状态处理：等待10秒后再次监测"""
+    def _state_rest_wait_30(self):
+        """REST_WAIT_30状态处理：等待30秒后开始90秒检测"""
         current_time = time.time()
         elapsed = current_time - self._state_start_time
         
-        # 等待10秒
-        if elapsed >= 10:
-            logger.info("10秒等待结束，再次监测")
-            self._state = "RESUME_MONITORING"
+        if elapsed >= 30:
+            logger.info("30秒等待结束，开始90秒检测")
+            self._state = "REST_DETECT_90"
             self._state_start_time = current_time
-            self._reset_activity_window()
             return
         
         self._stop_event.wait(1)
+    
+    def _state_rest_detect_90(self):
+        """REST_DETECT_90状态处理：进行90秒检测，确认用户是否结束休息"""
+        current_time = time.time()
+        elapsed = current_time - self._state_start_time
+        
+        if self._check_activity_since(self._state_start_time):
+            logger.info("90秒检测期间检测到用户操作，判定用户结束休息")
+            
+            # 调用恢复录制回调（重新启动录制），获取录制开始时间
+            recording_start_time = None
+            if self._on_resume_recording:
+                logger.info("调用恢复录制回调，重新启动录制")
+                try:
+                    recording_start_time = self._on_resume_recording()
+                except Exception as e:
+                    logger.error(f"恢复录制回调执行失败: {e}")
+            
+            # 更新休息卡片结束时间（使用录制实际开始时间）
+            self._update_rest_card_end_time(recording_start_time)
+            
+            self._auto_paused = False
+            logger.info("设置自动暂停状态为 False，UI 应显示'录制中'")
+            
+            self._state = "IDLE"
+            self._state_start_time = current_time
+            return
+        
+        if elapsed >= 90:
+            logger.info("90秒检测期间无操作，判定为用户误触，回到休息监测状态")
+            self._state = "REST_MONITORING"
+            self._state_start_time = current_time
+            return
+        
+        self._stop_event.wait(0.1)
+    
+    def _create_rest_card(self):
+        """创建休息卡片"""
+        if not self._rest_start_time:
+            return None
+            
+        current_time = datetime.now()
+        rest_duration = (current_time - self._rest_start_time).total_seconds() / 60  # 分钟
+        
+        # 获取上一张卡片，验证时间连续性
+        previous_card = None
+        if self._storage:
+            previous_cards = self._storage.get_cards_before_time(
+                self._rest_start_time,
+                limit=1
+            )
+            if previous_cards:
+                previous_card = previous_cards[0]
+        
+        # 如果上一张卡片存在，检查其结束时间是否晚于休息开始时间
+        if previous_card and previous_card._next_card_start_time:
+            if previous_card._next_card_start_time > self._rest_start_time:
+                # 上一张卡片的结束时间晚于休息开始时间，存在时间重叠
+                logger.warning(
+                    f"休息卡片与上一张活动卡片时间重叠：上一张卡片 ({previous_card.title}) 的结束时间 {previous_card._next_card_start_time} "
+                    f"晚于休息开始时间 {self._rest_start_time}，修正上一张卡片的结束时间"
+                )
+                
+                # 更新上一张卡片的结束时间
+                old_end_time = previous_card._next_card_start_time
+                previous_card._next_card_start_time = self._rest_start_time
+                
+                # 计算修正后的持续时间
+                corrected_duration = (previous_card._next_card_start_time - previous_card.start_time).total_seconds() / 60
+                logger.info(
+                    f"已修正上一张卡片 {previous_card.id} ({previous_card.title}) 的结束时间: "
+                    f"{old_end_time} -> {previous_card._next_card_start_time} "
+                    f"(持续时间: {corrected_duration:.1f}分钟)"
+                )
+                
+                # 更新数据库
+                if previous_card.id:
+                    success = self._storage.update_card(
+                        previous_card.id,
+                        end_time=previous_card._next_card_start_time
+                    )
+                    if not success:
+                        logger.error(f"更新上一张卡片 {previous_card.id} 的结束时间失败")
+            
+        rest_card = ActivityCard(
+            category="休息",
+            title="休息时间",
+            summary=f"用户休息了 {format_rest_duration(rest_duration)}",
+            start_time=self._rest_start_time,
+            app_sites=[],
+            productivity_score=0.0
+        )
+        rest_card._next_card_start_time = current_time
+        
+        if self._storage:
+            try:
+                self._storage.save_card(rest_card)
+                self._current_rest_card_id = rest_card.id
+                logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                return rest_card
+            except Exception as e:
+                logger.error(f"保存休息卡片失败: {e}")
+                return None
+        return None
+    
+    def _update_rest_card_end_time(self, end_time: datetime = None):
+        """更新休息卡片的结束时间（用户结束休息时调用）
+        
+        Args:
+            end_time: 休息结束时间，如果为None则使用当前时间
+        """
+        if not self._current_rest_card_id or not self._rest_start_time:
+            return
+            
+        current_time = end_time if end_time else datetime.now()
+        rest_duration = (current_time - self._rest_start_time).total_seconds() / 60  # 分钟
+        
+        if self._storage:
+            try:
+                updated = self._storage.update_card(
+                    self._current_rest_card_id,
+                    end_time=current_time,
+                    summary=f"用户休息了 {format_rest_duration(rest_duration)}"
+                )
+                if updated:
+                    logger.info(f"已更新休息卡片结束时间: {self._rest_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                    
+                    # 验证与下一张卡片的时间连续性
+                    # 获取休息结束时间之后的下一张卡片
+                    next_cards = self._storage.get_cards_after_time(
+                        current_time,
+                        limit=1
+                    )
+                    if next_cards:
+                        next_card = next_cards[0]
+                        if current_time > next_card.start_time:
+                            # 休息卡片的结束时间晚于下一张卡片的开始时间，修正休息卡片的结束时间
+                            logger.warning(
+                                f"休息卡片与下一张卡片时间重叠：休息卡片的结束时间 {current_time} "
+                                f"晚于下一张卡片 ({next_card.title}) 的开始时间 {next_card.start_time}，修正休息卡片的结束时间"
+                            )
+                            success = self._storage.update_card(
+                                self._current_rest_card_id,
+                                end_time=next_card.start_time,
+                                summary=f"用户休息了 {(next_card.start_time - self._rest_start_time).total_seconds() / 60:.1f}分钟"
+                            )
+                            if success:
+                                logger.info(f"已修正休息卡片的结束时间: {current_time} -> {next_card.start_time}")
+                    
+                    # 清除卡片ID，表示休息结束
+                    self._rest_start_time = None
+                    self._current_rest_card_id = None
+            except Exception as e:
+                logger.error(f"更新休息卡片失败: {e}")
+    
+    def _update_rest_card_end_time_for_loop(self):
+        """更新休息卡片的结束时间（后台更新循环调用，不清除卡片ID）"""
+        if not self._current_rest_card_id or not self._rest_start_time:
+            return
+            
+        current_time = datetime.now()
+        rest_duration = (current_time - self._rest_start_time).total_seconds() / 60  # 分钟
+        
+        if self._storage:
+            try:
+                updated = self._storage.update_card(
+                    self._current_rest_card_id,
+                    end_time=current_time,
+                    summary=f"用户休息了 {format_rest_duration(rest_duration)}"
+                )
+                if updated:
+                    logger.info(f"已更新休息卡片结束时间: {self._rest_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+            except Exception as e:
+                logger.error(f"更新休息卡片失败: {e}")
+    
+    def _start_rest_card_update_thread(self):
+        """启动休息卡片更新线程"""
+        if self._rest_card_update_thread and self._rest_card_update_thread.is_alive():
+            return
+            
+        self._rest_card_update_stop_event.clear()
+        self._rest_card_update_thread = threading.Thread(target=self._rest_card_update_loop, daemon=True)
+        self._rest_card_update_thread.start()
+        logger.info("休息卡片更新线程已启动")
+    
+    def _stop_rest_card_update_thread(self):
+        """停止休息卡片更新线程"""
+        self._rest_card_update_stop_event.set()
+        if self._rest_card_update_thread and self._rest_card_update_thread.is_alive():
+            self._rest_card_update_thread.join(timeout=2)
+        logger.info("休息卡片更新线程已停止")
+    
+    def _rest_card_update_loop(self):
+        """休息卡片更新循环"""
+        while not self._rest_card_update_stop_event.is_set():
+            try:
+                if self._current_rest_card_id and self._rest_start_time:
+                    self._update_rest_card_end_time_for_loop()
+                self._rest_card_update_stop_event.wait(60)  # 每60秒更新一次
+            except Exception as e:
+                logger.error(f"休息卡片更新循环错误: {e}")
+                self._rest_card_update_stop_event.wait(10)
     
     def _pause_recording(self):
         """暂停录制"""
@@ -747,7 +921,6 @@ class SmartAutoPauseRecorder:
             logger.info("自动暂停录制")
             self.recorder.pause()
             self._auto_paused = True
-            self._rest_start_time = datetime.now()
         else:
             logger.info(f"录制器状态: 录制={self.recorder.is_recording}, 暂停={self.recorder.is_paused}, 不执行暂停")
     
@@ -758,117 +931,14 @@ class SmartAutoPauseRecorder:
             self.recorder.resume()
             self._auto_paused = False
             
-            # 创建休息卡片
-            if self._rest_start_time:
-                rest_end_time = datetime.now()
-                rest_duration = (rest_end_time - self._rest_start_time).total_seconds() / 60  # 分钟
-                
-                if rest_duration >= 1:  # 只记录休息时间超过1分钟的
-                    # 回顾过去2分钟内的所有卡片
-                    recent_cards = self._storage.get_recent_cards(limit=20)
-                    two_minutes_ago = rest_end_time - timedelta(minutes=2)
-                    
-                    # 找到过去2分钟内的卡片
-                    cards_in_last_2min = [
-                        card for card in recent_cards
-                        if card.end_time and card.end_time >= two_minutes_ago
-                    ]
-                    
-                    if cards_in_last_2min:
-                        logger.info(f"过去2分钟内发现 {len(cards_in_last_2min)} 张卡片")
-                        
-                        # 检查是否有休息卡片
-                        rest_cards_in_range = [card for card in cards_in_last_2min if card.category == "休息"]
-                        
-                        if rest_cards_in_range:
-                            # 合并休息卡片：找到最早的休息卡片
-                            earliest_rest_card = min(rest_cards_in_range, key=lambda c: c.start_time)
-                            merged_start_time = min(earliest_rest_card.start_time, self._rest_start_time)
-                            merged_duration = (rest_end_time - merged_start_time).total_seconds() / 60
-                            
-                            # 删除旧的休息卡片
-                            for card in rest_cards_in_range:
-                                self._storage.delete_card(card.id)
-                                logger.info(f"删除旧休息卡片 (ID: {card.id})")
-                            
-                            # 创建合并后的休息卡片
-                            rest_card = ActivityCard(
-                                category="休息",
-                                title="休息时间",
-                                summary=f"用户休息了 {format_rest_duration(merged_duration)}",
-                                start_time=merged_start_time,
-                                app_sites=[],
-                                distractions=[],
-                                productivity_score=0.0
-                            )
-                            rest_card._next_card_start_time = rest_end_time
-                            
-                            if self._storage:
-                                try:
-                                    self._storage.save_card(rest_card)
-                                    logger.info(f"已创建合并后的休息卡片: {merged_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({merged_duration:.1f}分钟)")
-                                except Exception as e:
-                                    logger.error(f"保存休息卡片失败: {e}")
-                        else:
-                            # 没有休息卡片，检查是否有其他卡片（视为休息时的误触）
-                            non_rest_cards = [card for card in cards_in_last_2min if card.category != "休息"]
-                            if non_rest_cards:
-                                # 删除这些误触卡片
-                                for card in non_rest_cards:
-                                    self._storage.delete_card(card.id)
-                                    logger.info(f"删除休息时的误触卡片 (ID: {card.id}, 类别: {card.category})")
-                            
-                            # 创建新的休息卡片
-                            rest_card = ActivityCard(
-                                category="休息",
-                                title="休息时间",
-                                summary=f"用户休息了 {format_rest_duration(rest_duration)}",
-                                start_time=self._rest_start_time,
-                                app_sites=[],
-                                distractions=[],
-                                productivity_score=0.0
-                            )
-                            rest_card._next_card_start_time = rest_end_time
-                            
-                            if self._storage:
-                                try:
-                                    self._storage.save_card(rest_card)
-                                    logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
-                                except Exception as e:
-                                    logger.error(f"保存休息卡片失败: {e}")
-                    else:
-                        # 过去2分钟内没有卡片，直接创建休息卡片
-                        rest_card = ActivityCard(
-                            category="休息",
-                            title="休息时间",
-                            summary=f"用户休息了 {format_rest_duration(rest_duration)}",
-                            start_time=self._rest_start_time,
-                            app_sites=[],
-                            distractions=[],
-                            productivity_score=0.0
-                        )
-                        rest_card._next_card_start_time = rest_end_time
-                        
-                        if self._storage:
-                            try:
-                                self._storage.save_card(rest_card)
-                                logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
-                            except Exception as e:
-                                logger.error(f"保存休息卡片失败: {e}")
-                else:
-                    logger.info(f"休息时间不足1分钟 ({rest_duration:.1f}分钟)，不创建卡片")
-                
-                self._rest_start_time = None
+            self._stop_rest_card_update_thread()
+            self._current_rest_card_id = None
         else:
             logger.info("录制器未暂停，不执行恢复")
     
     def _monitor_loop(self):
         """监测主循环"""
         logger.info("智能自动暂停录制器已启动")
-        logger.info(f"  - 停止检测间隔: {self.stop_check_interval}秒")
-        logger.info(f"  - 停止检测持续时间: {self.stop_detection_duration}秒")
-        logger.info(f"  - 恢复等待持续时间: {self.resume_wait_duration}秒")
-        logger.info(f"  - 恢复检测持续时间: {self.resume_detection_duration}秒")
         logger.info(f"  - 初始状态: {self._state}")
         
         self._state = "IDLE"
@@ -878,22 +948,20 @@ class SmartAutoPauseRecorder:
             try:
                 if self._state == "IDLE":
                     self._state_idle()
-                elif self._state == "STOP_10S_CHECK":
-                    self._state_stop_10s_check()
-                elif self._state == "STOP_WAIT_60":
-                    self._state_stop_wait_60()
-                elif self._state == "STOP_MONITORING":
-                    self._state_stop_monitoring()
+                elif self._state == "WAIT_FOR_CHECK":
+                    self._state_wait_for_check()
+                elif self._state == "CHECK_10S":
+                    self._state_check_10s()
+                elif self._state == "CHECK_60S":
+                    self._state_check_60s()
                 elif self._state == "STOPPED":
                     self._state_stopped()
-                elif self._state == "RESUME_MONITORING":
-                    self._state_resume_monitoring()
-                elif self._state == "RESUME_WAIT_30":
-                    self._state_resume_wait_30()
-                elif self._state == "RESUME_DETECT_30":
-                    self._state_resume_detect_30()
-                elif self._state == "RESUME_WAIT_10":
-                    self._state_resume_wait_10()
+                elif self._state == "REST_MONITORING":
+                    self._state_rest_monitoring()
+                elif self._state == "REST_WAIT_30":
+                    self._state_rest_wait_30()
+                elif self._state == "REST_DETECT_90":
+                    self._state_rest_detect_90()
                 else:
                     logger.warning(f"未知状态: {self._state}")
                     self._state = "IDLE"
@@ -956,91 +1024,113 @@ class SmartAutoPauseRecorder:
             rest_end_time = datetime.now()
             rest_duration = (rest_end_time - self._rest_start_time).total_seconds() / 60  # 分钟
             
-            if rest_duration >= 1:  # 只记录休息时间超过1分钟的
-                # 回顾过去2分钟内的所有卡片
-                recent_cards = self._storage.get_recent_cards(limit=20)
-                two_minutes_ago = rest_end_time - timedelta(minutes=2)
+            # 创建休息卡片，不限制休息时间
+            
+            # 回顾过去2分钟内的所有卡片
+            recent_cards = self._storage.get_recent_cards(limit=20)
+            two_minutes_ago = rest_end_time - timedelta(minutes=2)
+            
+            # 找到过去2分钟内的卡片
+            cards_in_last_2min = [
+                card for card in recent_cards
+                if card.end_time and card.end_time >= two_minutes_ago
+            ]
+            
+            if cards_in_last_2min:
+                logger.info(f"过去2分钟内发现 {len(cards_in_last_2min)} 张卡片")
                 
-                # 找到过去2分钟内的卡片
-                cards_in_last_2min = [
-                    card for card in recent_cards
-                    if card.end_time and card.end_time >= two_minutes_ago
-                ]
+                # 检查是否有休息卡片
+                rest_cards_in_range = [card for card in cards_in_last_2min if card.category == "休息"]
                 
-                if cards_in_last_2min:
-                    logger.info(f"过去2分钟内发现 {len(cards_in_last_2min)} 张卡片")
+                if rest_cards_in_range:
+                    # 合并休息卡片：找到最早的休息卡片
+                    earliest_rest_card = min(rest_cards_in_range, key=lambda c: c.start_time)
+                    merged_start_time = min(earliest_rest_card.start_time, self._rest_start_time)
+                    merged_duration = (rest_end_time - merged_start_time).total_seconds() / 60
                     
-                    # 检查是否有休息卡片
-                    rest_cards_in_range = [card for card in cards_in_last_2min if card.category == "休息"]
+                    # 删除旧的休息卡片
+                    for card in rest_cards_in_range:
+                        self._storage.delete_card(card.id)
+                        logger.info(f"删除旧休息卡片 (ID: {card.id})")
                     
-                    if rest_cards_in_range:
-                        # 合并休息卡片：找到最早的休息卡片
-                        earliest_rest_card = min(rest_cards_in_range, key=lambda c: c.start_time)
-                        merged_start_time = min(earliest_rest_card.start_time, self._rest_start_time)
-                        merged_duration = (rest_end_time - merged_start_time).total_seconds() / 60
-                        
-                        # 删除旧的休息卡片
-                        for card in rest_cards_in_range:
-                            self._storage.delete_card(card.id)
-                            logger.info(f"删除旧休息卡片 (ID: {card.id})")
-                        
-                        # 创建合并后的休息卡片
-                        rest_card = ActivityCard(
-                            category="休息",
-                            title="休息时间",
-                            summary=f"用户休息了 {format_rest_duration(merged_duration)}",
-                            start_time=merged_start_time,
-                            app_sites=[],
-                            distractions=[],
-                            productivity_score=0.0
+                    # 创建合并后的休息卡片
+                    rest_card = ActivityCard(
+                        category="休息",
+                        title="休息时间",
+                        summary=f"用户休息了 {format_rest_duration(merged_duration)}",
+                        start_time=merged_start_time,
+                        app_sites=[],
+                        productivity_score=0.0
+                    )
+                    rest_card._next_card_start_time = rest_end_time
+                    
+                    # 验证与上一张卡片的时间连续性
+                    if self._storage:
+                        previous_cards = self._storage.get_cards_before_time(
+                            merged_start_time,
+                            limit=1
                         )
-                        rest_card._next_card_start_time = rest_end_time
-                        
-                        if self._storage:
-                            try:
-                                self._storage.save_card(rest_card)
-                                logger.info(f"已创建合并后的休息卡片: {merged_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({merged_duration:.1f}分钟)")
-                            except Exception as e:
-                                logger.error(f"保存休息卡片失败: {e}")
-                    else:
-                        # 没有休息卡片，检查是否有其他卡片（视为休息时的误触）
-                        non_rest_cards = [card for card in cards_in_last_2min if card.category != "休息"]
-                        if non_rest_cards:
-                            # 删除这些误触卡片
-                            for card in non_rest_cards:
-                                self._storage.delete_card(card.id)
-                                logger.info(f"删除休息时的误触卡片 (ID: {card.id}, 类别: {card.category})")
-                        
-                        # 创建新的休息卡片
-                        rest_card = ActivityCard(
-                            category="休息",
-                            title="休息时间",
-                            summary=f"用户休息了 {format_rest_duration(rest_duration)}",
-                            start_time=self._rest_start_time,
-                            app_sites=[],
-                            distractions=[],
-                            productivity_score=0.0
-                        )
-                        rest_card._next_card_start_time = rest_end_time
-                        
-                        if self._storage:
-                            try:
-                                self._storage.save_card(rest_card)
-                                logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
-                            except Exception as e:
-                                logger.error(f"保存休息卡片失败: {e}")
+                        if previous_cards:
+                            previous_card = previous_cards[0]
+                            if previous_card._next_card_start_time and previous_card._next_card_start_time > merged_start_time:
+                                # 上一张卡片的结束时间晚于休息开始时间，修正上一张卡片
+                                logger.warning(
+                                    f"合并休息卡片与上一张卡片时间重叠：上一张卡片 ({previous_card.title}) 的结束时间 {previous_card._next_card_start_time} "
+                                    f"晚于休息开始时间 {merged_start_time}，修正上一张卡片的结束时间"
+                                )
+                                success = self._storage.update_card(
+                                    previous_card.id,
+                                    end_time=merged_start_time
+                                )
+                                if success:
+                                    logger.info(f"已修正上一张卡片 {previous_card.id} 的结束时间: {previous_card._next_card_start_time} -> {merged_start_time}")
+                    
+                    if self._storage:
+                        try:
+                            self._storage.save_card(rest_card)
+                            logger.info(f"已创建合并后的休息卡片: {merged_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({merged_duration:.1f}分钟)")
+                        except Exception as e:
+                            logger.error(f"保存休息卡片失败: {e}")
                 else:
-                    # 过去2分钟内没有卡片，直接创建休息卡片
+                    # 没有休息卡片，检查是否有其他卡片（视为休息时的误触）
+                    non_rest_cards = [card for card in cards_in_last_2min if card.category != "休息"]
+                    if non_rest_cards:
+                        # 删除这些误触卡片
+                        for card in non_rest_cards:
+                            self._storage.delete_card(card.id)
+                            logger.info(f"删除休息时的误触卡片 (ID: {card.id}, 类别: {card.category})")
+                    
+                    # 创建新的休息卡片
                     rest_card = ActivityCard(
                         category="休息",
                         title="休息时间",
                         summary=f"用户休息了 {format_rest_duration(rest_duration)}",
                         start_time=self._rest_start_time,
                         app_sites=[],
-                        distractions=[],
                         productivity_score=0.0
                     )
                     rest_card._next_card_start_time = rest_end_time
+                    
+                    # 验证与上一张卡片的时间连续性
+                    if self._storage:
+                        previous_cards = self._storage.get_cards_before_time(
+                            self._rest_start_time,
+                            limit=1
+                        )
+                        if previous_cards:
+                            previous_card = previous_cards[0]
+                            if previous_card._next_card_start_time and previous_card._next_card_start_time > self._rest_start_time:
+                                # 上一张卡片的结束时间晚于休息开始时间，修正上一张卡片
+                                logger.warning(
+                                    f"创建休息卡片与上一张卡片时间重叠：上一张卡片 ({previous_card.title}) 的结束时间 {previous_card._next_card_start_time} "
+                                    f"晚于休息开始时间 {self._rest_start_time}，修正上一张卡片的结束时间"
+                                )
+                                success = self._storage.update_card(
+                                    previous_card.id,
+                                    end_time=self._rest_start_time
+                                )
+                                if success:
+                                    logger.info(f"已修正上一张卡片 {previous_card.id} 的结束时间: {previous_card._next_card_start_time} -> {self._rest_start_time}")
                     
                     if self._storage:
                         try:
@@ -1049,7 +1139,23 @@ class SmartAutoPauseRecorder:
                         except Exception as e:
                             logger.error(f"保存休息卡片失败: {e}")
             else:
-                logger.info(f"休息时间不足1分钟 ({rest_duration:.1f}分钟)，不创建卡片")
+                # 过去2分钟内没有卡片，直接创建休息卡片
+                rest_card = ActivityCard(
+                    category="休息",
+                    title="休息时间",
+                    summary=f"用户休息了 {format_rest_duration(rest_duration)}",
+                    start_time=self._rest_start_time,
+                    app_sites=[],
+                    productivity_score=0.0
+                )
+                rest_card._next_card_start_time = rest_end_time
+                
+                if self._storage:
+                    try:
+                        self._storage.save_card(rest_card)
+                        logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                    except Exception as e:
+                        logger.error(f"保存休息卡片失败: {e}")
             
             self._rest_start_time = None
         

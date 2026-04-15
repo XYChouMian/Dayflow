@@ -28,7 +28,7 @@ VIDEO_BITRATE = "500k"  # 低码率
 VIDEO_CODEC = "libx264"
 
 # 分析配置
-BATCH_CHUNK_COUNT = 3  # 每个批次的切片数量
+BATCH_CHUNK_COUNT = 10  # 每个批次的切片数量
 ANALYSIS_INTERVAL_SECONDS = 60  # 扫描一次的间隔（秒）
 # ANALYSIS_MAX_IDLE_INTERVAL = 300  # 无任务时最大扫描间隔（秒）
 

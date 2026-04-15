@@ -248,6 +248,7 @@ class RecordingIndicator(QWidget):
         self._paused = False
         self._start_time = None
         self._elapsed_seconds = 0
+        self.recording_manager = None
         self._setup_ui()
         get_theme_manager().theme_changed.connect(self._apply_idle_theme)
     
@@ -286,12 +287,24 @@ class RecordingIndicator(QWidget):
     
     def _update_duration(self):
         """更新录制时长显示"""
-        if self._recording and not self._paused and self._start_time:
+        if self._recording and self._start_time:
             from datetime import datetime
             elapsed = (datetime.now() - self._start_time).total_seconds()
             self._elapsed_seconds = int(elapsed)
             duration_str = self._format_duration(self._elapsed_seconds)
-            self.status_label.setText(f"录制中 {duration_str}")
+            
+            # 检查是否处于休息状态
+            is_resting = self.recording_manager and self.recording_manager.is_auto_paused()
+            t = get_theme()
+            
+            if is_resting:
+                # 休息状态：显示灰色"休息中"
+                self.status_label.setText(f"休息中 {duration_str}")
+                self.status_label.setStyleSheet(f"color: {t.text_muted}; font-size: 12px;")
+            else:
+                # 录制状态：显示红色"录制中"
+                self.status_label.setText(f"录制中 {duration_str}")
+                self.status_label.setStyleSheet(f"color: {t.error}; font-size: 12px; font-weight: 600;")
     
     def _apply_idle_theme(self):
         if not self._recording:
@@ -319,11 +332,11 @@ class RecordingIndicator(QWidget):
             self._duration_timer.start(1000)
             
         elif recording and paused:
-            # 暂停
+            # 暂停（休息中）
             duration_str = self._format_duration(self._elapsed_seconds)
-            self.dot.setStyleSheet(f"color: {t.warning}; font-size: 10px;")
-            self.status_label.setText(f"已暂停 {duration_str}")
-            self.status_label.setStyleSheet(f"color: {t.warning}; font-size: 12px;")
+            self.dot.setStyleSheet(f"color: {t.text_muted}; font-size: 10px;")
+            self.status_label.setText(f"休息中 {duration_str}")
+            self.status_label.setStyleSheet(f"color: {t.text_muted}; font-size: 12px;")
             self._blink_timer.stop()
             self._duration_timer.stop()
             
@@ -1906,7 +1919,6 @@ class SettingsPanel(QWidget):
                         "start_time": row["start_time"],
                         "end_time": row["end_time"],
                         "app_sites_json": row["app_sites_json"],
-                        "distractions_json": row["distractions_json"],
                         "productivity_score": row["productivity_score"]
                     }
                     data["cards"].append(card_data)
@@ -2007,8 +2019,8 @@ class SettingsPanel(QWidget):
                     conn.execute("""
                         INSERT INTO timeline_cards 
                         (category, title, summary, start_time, end_time, 
-                         app_sites_json, distractions_json, productivity_score)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         app_sites_json, productivity_score)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (
                         card["category"],
                         card["title"],
@@ -2016,7 +2028,6 @@ class SettingsPanel(QWidget):
                         card["start_time"],
                         card["end_time"],
                         card.get("app_sites_json", "[]"),
-                        card.get("distractions_json", "[]"),
                         card.get("productivity_score", 0)
                     ))
                     imported_cards += 1
@@ -2174,11 +2185,20 @@ class SettingsPanel(QWidget):
         """迁移数据到新位置"""
         from PySide6.QtWidgets import QProgressDialog
         
+        # 检查是否正在追踪
+        if self.main_window and self.main_window.recording_manager and self.main_window.recording_manager.is_recording:
+            QMessageBox.warning(
+                self,
+                "提示",
+                "当前正在追踪，请先停止追踪后再更改数据存储位置。"
+            )
+            return
+        
         # 选择目标路径
         target_path = QFileDialog.getExistingDirectory(
             self,
             "选择数据存储位置",
-            str(Path.home()),
+            str(self.data_migration_manager.default_data_dir),
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
         
@@ -2720,14 +2740,6 @@ class MainWindow(QMainWindow):
         self.record_btn.clicked.connect(self._toggle_recording)
         sidebar_layout.addWidget(self.record_btn)
         
-        # 录屏控制按钮
-        self.pause_btn = QPushButton("⏸ 暂停录屏")
-        self.pause_btn.setCursor(Qt.PointingHandCursor)
-        self.pause_btn.setFixedHeight(36)
-        self.pause_btn.clicked.connect(self._toggle_pause)
-        self.pause_btn.setEnabled(False)
-        sidebar_layout.addWidget(self.pause_btn)
-        
         content_layout.addWidget(self.sidebar)
         
         # ===== 主内容区 =====
@@ -2810,17 +2822,11 @@ class MainWindow(QMainWindow):
         self.tray_record_action.triggered.connect(self._toggle_recording)
         tray_menu.addAction(self.tray_record_action)
         
-        # 录屏控制
-        self.tray_pause_action = QAction("⏸ 暂停录屏", self)
-        self.tray_pause_action.triggered.connect(self._toggle_pause)
-        self.tray_pause_action.setEnabled(False)
-        tray_menu.addAction(self.tray_pause_action)
-        
         tray_menu.addSeparator()
         
         # 退出
         quit_action = QAction("❌ 退出", self)
-        quit_action.triggered.connect(self._quit_app)
+        quit_action.triggered.connect(self._quit_application)
         tray_menu.addAction(quit_action)
         
         self.tray_icon.setContextMenu(tray_menu)
@@ -2836,12 +2842,13 @@ class MainWindow(QMainWindow):
         self.refresh_timer.start(30000)  # 每 30 秒刷新
         
         # 健康提醒定时器 - 每 5 分钟检查一次
+        # 注意：定时器在开始追踪时启动，停止追踪时停止
         self.health_reminder = HealthReminder(
             storage=self.storage
         )
         self.health_timer = QTimer(self)
         self.health_timer.timeout.connect(self._check_health_reminder)
-        self.health_timer.start(config.HEALTH_REMINDER_CHECK_INTERVAL)
+        # 定时器不自动启动，将在开始追踪时启动
         
         # 活动状态监控定时器 - 每 5 秒检查一次
         self.activity_timer = QTimer(self)
@@ -2969,14 +2976,10 @@ class MainWindow(QMainWindow):
                 if not self.recording_indicator._paused:
                     idle_time = self.recording_manager.get_idle_time()
                     self.recording_indicator.set_recording(True, paused=True)
-                    # 更新暂停按钮UI
-                    self._update_pause_button(True)
             else:
                 # 恢复正常录制
                 if self.recording_indicator._paused:
                     self.recording_indicator.set_recording(True, paused=False)
-                    # 更新暂停按钮UI
-                    self._update_pause_button(False)
         except Exception as e:
             pass
     
@@ -3017,6 +3020,7 @@ class MainWindow(QMainWindow):
                 from core.recorder import RecordingManager
                 scheduler = self.analysis_manager.scheduler if self.analysis_manager else None
                 self.recording_manager = RecordingManager(self.storage, scheduler=scheduler)
+                self.recording_indicator.recording_manager = self.recording_manager
             
             # 如果已经在录制，则跳过
             if self.recording_manager.is_recording:
@@ -3030,9 +3034,10 @@ class MainWindow(QMainWindow):
             self.recording_indicator.set_recording(True)
             self.tray_record_action.setText("⏹ 停止追踪")
             self.tray_icon.setToolTip("Dayflow - 录制中...")
-            self.pause_btn.setEnabled(True)
-            self.tray_pause_action.setEnabled(True)
-            self._update_pause_button(False)
+            
+            # 启动健康提醒定时器
+            self.health_timer.start(config.HEALTH_REMINDER_CHECK_INTERVAL)
+            logger.info("健康提醒定时器已启动")
             
             # 显示托盘提示
             self.tray_icon.showMessage(
@@ -3045,12 +3050,49 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"自动开始录制失败: {e}")
     
+    def _stop_recording_original(self):
+        """原来的完善的停止追踪方法（备份）"""
+        # 防止重复点击
+        if self._stopping:
+            logger.debug("已在停止中，忽略重复点击")
+            return
+        self._stopping = True
+        
+        # 立即更新 UI，让用户知道正在停止
+        self.record_btn.setEnabled(False)
+        self.record_btn.setText("停止中，正在分析\n请耐心等候")
+        self.tray_record_action.setEnabled(False)
+        
+        # 显示提示消息
+        self.tray_icon.showMessage(
+            "Dayflow",
+            "正在保存数据并结束录制，请稍候...",
+            QSystemTrayIcon.Information,
+            3000  # 显示 3 秒
+        )
+        
+        # 在后台线程中执行停止操作
+        import threading
+        def stop_in_background():
+            try:
+                self.recording_manager.stop_recording()
+                self._stop_analysis()
+            except Exception as e:
+                logger.error(f"停止录制时出错: {e}")
+            finally:
+                # 回到主线程更新 UI
+                from PySide6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(self, "_on_recording_stopped", Qt.QueuedConnection)
+        
+        threading.Thread(target=stop_in_background, daemon=True).start()
+
     def _toggle_recording(self):
         """切换录制状态"""
         if self.recording_manager is None:
             from core.recorder import RecordingManager
             scheduler = self.analysis_manager.scheduler if self.analysis_manager else None
             self.recording_manager = RecordingManager(self.storage, scheduler=scheduler)
+            self.recording_indicator.recording_manager = self.recording_manager
         
         if self.recording_manager.is_recording:
             # 防止重复点击
@@ -3061,8 +3103,7 @@ class MainWindow(QMainWindow):
             
             # 立即更新 UI，让用户知道正在停止
             self.record_btn.setEnabled(False)
-            self.record_btn.setText("停止中，请耐心等候")
-            self.pause_btn.setEnabled(False)
+            self.record_btn.setText("停止中，正在分析，\n请耐心等候")
             self.tray_record_action.setEnabled(False)
             
             # 显示提示消息
@@ -3077,10 +3118,20 @@ class MainWindow(QMainWindow):
             import threading
             def stop_in_background():
                 try:
-                    self.recording_manager.stop_recording()
-                    self._stop_analysis()
+                    logger.info("========== UI层：开始停止追踪（后台线程） ==========")
+                    # 使用新的stop_tracking方法：完全停止录制、休息检测和分析调度器
+                    # stop_tracking内部会调用analyze_remaining_chunks，确保所有切片都被分析
+                    stop_time = self.recording_manager.stop_tracking()
+                    logger.info(f"========== UI层：stop_tracking完成，停止时间={stop_time.strftime('%H:%M:%S') if stop_time else 'None'} ==========")
+                    
+                    # 注意：不再在这里调用self._stop_analysis()
+                    # 因为stop_tracking已经调用了analyze_remaining_chunks，会等待所有分析完成
+                    # 这里停止分析调度器可能会中断正在进行的分析
+                    logger.info("========== UI层：跳过_stop_analysis，等待analyze_remaining_chunks完成 ==========")
                 except Exception as e:
-                    logger.error(f"停止录制时出错: {e}")
+                    logger.error(f"停止追踪时出错: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
                 finally:
                     # 回到主线程更新 UI
                     from PySide6.QtCore import QMetaObject, Qt
@@ -3098,16 +3149,19 @@ class MainWindow(QMainWindow):
                 self._switch_page(2)
                 return
             
-            # 先启动分析调度器
+            # 启动分析调度器（如果未启动）
             self._start_analysis()
             
+            # RecordingManager 会自动启动分析调度器（强绑定）
             self.recording_manager.start_recording()
             self._update_record_button(True)
             self.recording_indicator.set_recording(True)
             self.tray_record_action.setText("⏹ 停止追踪")
             self.tray_icon.setToolTip("Dayflow - 录制中...")
-            self.pause_btn.setEnabled(True)
-            self.tray_pause_action.setEnabled(True)
+            
+            # 启动健康提醒定时器
+            self.health_timer.start(config.HEALTH_REMINDER_CHECK_INTERVAL)
+            logger.info("健康提醒定时器已启动")
     
     def _start_analysis(self):
         """启动分析调度器"""
@@ -3120,10 +3174,17 @@ class MainWindow(QMainWindow):
         logger.info("分析调度器已启动")
     
     def _stop_analysis(self):
-        """停止分析调度器"""
-        if self.analysis_manager:
+        """停止分析调度器
+        
+        注意：
+        - 录制状态下，分析调度器由 RecordingManager 管理（强绑定）
+        - 此方法仅在非录制状态下使用（如退出应用、重启应用）
+        """
+        if self.analysis_manager and not (self.recording_manager and self.recording_manager.is_recording):
             self.analysis_manager.stop_scheduler()
-            logger.info("分析调度器已停止")
+            logger.info("分析调度器已停止（非录制状态）")
+        elif self.recording_manager and self.recording_manager.is_recording:
+            logger.info("录制状态下，分析调度器由 RecordingManager 管理，无需手动停止")
     
     @Slot()
     def _on_recording_stopped(self):
@@ -3135,19 +3196,10 @@ class MainWindow(QMainWindow):
         self.tray_record_action.setEnabled(True)
         self.tray_record_action.setText("▶ 开始追踪")
         self.tray_icon.setToolTip("Dayflow - 智能时间追踪")
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setText("⏸ 暂停录屏")
-        self.tray_pause_action.setEnabled(False)
-        self.tray_pause_action.setText("⏸ 暂停录屏")
         
-        # 强制分析剩余切片（录制停止时）
-        if self.analysis_manager and self.analysis_manager.scheduler:
-            try:
-                logger.info("录制已停止，开始分析剩余的视频片段")
-                self.analysis_manager.scheduler.analyze_remaining_chunks()
-                logger.info("剩余片段分析完成")
-            except Exception as e:
-                logger.error(f"分析剩余片段失败: {e}")
+        # 停止健康提醒定时器
+        self.health_timer.stop()
+        logger.info("健康提醒定时器已停止")
         
         # 显示完成提示
         self.tray_icon.showMessage(
@@ -3156,41 +3208,6 @@ class MainWindow(QMainWindow):
             QSystemTrayIcon.Information,
             2000
         )
-    
-    def _toggle_pause(self):
-        """切换暂停状态"""
-        if self.recording_manager is None:
-            return
-        
-        if self.recording_manager.is_paused:
-            # 继续录制
-            self.recording_manager.resume_recording()
-            self.pause_btn.setText("⏸ 暂停录屏")
-            self.tray_pause_action.setText("⏸ 暂停录屏")
-            self.recording_indicator.set_recording(True, paused=False)
-            self.tray_icon.setToolTip("Dayflow - 录制中...")
-            logger.info("录制已继续")
-        else:
-            # 暂停录制
-            self.recording_manager.pause_recording()
-            self.pause_btn.setText("▶ 继续录屏")
-            self.tray_pause_action.setText("▶ 继续录屏")
-            self.recording_indicator.set_recording(True, paused=True)
-            elapsed = self.recording_indicator.get_elapsed_time()
-            self.tray_icon.setToolTip(f"Dayflow - 已暂停 {elapsed}")
-            logger.info("录制已暂停")
-    
-    def _update_pause_button(self, paused: bool):
-        """更新暂停按钮状态"""
-        if paused:
-            self.pause_btn.setText("▶ 继续录屏")
-            self.tray_pause_action.setText("▶ 继续录屏")
-            elapsed = self.recording_indicator.get_elapsed_time()
-            self.tray_icon.setToolTip(f"Dayflow - 已暂停 {elapsed}")
-        else:
-            self.pause_btn.setText("⏸ 暂停录屏")
-            self.tray_pause_action.setText("⏸ 暂停录屏")
-            self.tray_icon.setToolTip("Dayflow - 录制中...")
     
     def _update_record_button(self, recording: bool):
         """更新录制按钮状态"""
@@ -3252,24 +3269,6 @@ class MainWindow(QMainWindow):
         
         # 主内容区
         self.stack.setStyleSheet(f"background-color: {t.bg_primary};")
-        
-        # 暂停按钮
-        self.pause_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {t.bg_tertiary};
-                color: {t.text_primary};
-                border: none;
-                border-radius: 10px;
-                font-size: 13px;
-            }}
-            QPushButton:hover {{
-                background-color: {t.bg_hover};
-            }}
-            QPushButton:disabled {{
-                background-color: {t.bg_secondary};
-                color: {t.text_muted};
-            }}
-        """)
         
         # 更新录制按钮（根据当前状态）
         is_recording = self.recording_manager and self.recording_manager.is_recording
@@ -3474,15 +3473,15 @@ class MainWindow(QMainWindow):
             current = current.parent()
         return False
     
-    def _quit_app(self):
+    def _quit_application(self):
         """退出应用"""
         self._quitting = True  # 标记正在退出
         
-        # 停止录制
+        # 停止录制（强绑定：自动停止分析调度器）
         if self.recording_manager and self.recording_manager.is_recording:
-            self.recording_manager.stop_recording()
+            self.recording_manager.stop_tracking()
         
-        # 停止分析
+        # 停止分析（非录制状态）
         self._stop_analysis()
         
         # 关闭数据库连接，确保数据写入
@@ -3498,7 +3497,7 @@ class MainWindow(QMainWindow):
         
         # 停止录制和分析
         if self.recording_manager and self.recording_manager.is_recording:
-            self.recording_manager.stop_recording()
+            self.recording_manager.stop_tracking()
         self._stop_analysis()
         
         # 关闭数据库
@@ -3546,6 +3545,16 @@ class MainWindow(QMainWindow):
             # 真正退出，接受关闭事件
             event.accept()
         else:
+            # 检查是否正在追踪
+            if self.recording_manager and self.recording_manager.is_recording:
+                msg_box = create_themed_message_box(self)
+                msg_box.setWindowTitle("提示")
+                msg_box.setText("当前正在追踪，请先停止追踪后再退出。")
+                msg_box.setStandardButtons(QMessageBox.Ok)
+                msg_box.exec()
+                event.ignore()
+                return
+            
             # 询问用户
             msg_box = create_themed_message_box(self)
             msg_box.setWindowTitle("退出确认")
@@ -3556,7 +3565,7 @@ class MainWindow(QMainWindow):
             
             if reply == QMessageBox.Yes:
                 event.ignore()
-                self._quit_app()
+                self._quit_application()
             elif reply == QMessageBox.No:
                 event.ignore()
                 self._minimize_to_tray()

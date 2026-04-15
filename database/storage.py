@@ -14,7 +14,7 @@ import config
 from core.types import (
     VideoChunk, ChunkStatus,
     AnalysisBatch, BatchStatus,
-    ActivityCard, AppSite, Distraction,
+    ActivityCard, AppSite,
     InspirationCard
 )
 from database.connection_pool import ConnectionPool, PoolExhaustedError
@@ -145,6 +145,43 @@ class StorageManager:
                 conn.execute("ALTER TABLE daily_summaries_new RENAME TO daily_summaries")
                 
                 logger.info("数据库迁移: 已删除 daily_summaries.content 字段")
+            
+            # # 检查 timeline_cards 表是否需要删除 distractions_json 字段
+            # cursor = conn.execute("PRAGMA table_info(timeline_cards)")
+            # columns_info = cursor.fetchall()
+            # columns = [row[1] for row in columns_info]
+            
+            # if "distractions_json" in columns:
+            #     # 重建表以删除 distractions_json 字段（SQLite 不支持直接删除列）
+            #     conn.execute("""
+            #         CREATE TABLE timeline_cards_new (
+            #             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            #             batch_id INTEGER,
+            #             category TEXT NOT NULL,
+            #             title TEXT NOT NULL,
+            #             summary TEXT,
+            #             start_time TIMESTAMP NOT NULL,
+            #             end_time TIMESTAMP NOT NULL,
+            #             app_sites_json TEXT DEFAULT '[]',
+            #             productivity_score REAL DEFAULT 0,
+            #             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            #             FOREIGN KEY (batch_id) REFERENCES analysis_batches(id)
+            #         )
+            #     """)
+                
+            #     # 复制数据（不包含 distractions_json）
+            #     conn.execute("""
+            #         INSERT INTO timeline_cards_new (id, batch_id, category, title, summary, start_time, end_time, app_sites_json, productivity_score, created_at)
+            #         SELECT id, batch_id, category, title, summary, start_time, end_time, app_sites_json, productivity_score, created_at FROM timeline_cards
+            #     """)
+                
+            #     # 删除旧表
+            #     conn.execute("DROP TABLE timeline_cards")
+                
+            #     # 重命名新表
+            #     conn.execute("ALTER TABLE timeline_cards_new RENAME TO timeline_cards")
+                
+            #     logger.info("数据库迁移: 已删除 timeline_cards.distractions_json 字段")
         except Exception as e:
             logger.debug(f"数据库迁移检查: {e}")
     
@@ -361,8 +398,8 @@ class StorageManager:
                 """
                 INSERT INTO timeline_cards 
                 (batch_id, category, title, summary, start_time, end_time, 
-                 app_sites_json, distractions_json, productivity_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 app_sites_json, productivity_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -372,7 +409,6 @@ class StorageManager:
                     card.start_time.isoformat() if card.start_time else None,
                     card.end_time.isoformat() if card.end_time else None,  # 从属性获取
                     json.dumps([a.to_dict() for a in card.app_sites]),
-                    json.dumps([d.to_dict() for d in card.distractions]),
                     card.productivity_score
                 )
             )
@@ -411,6 +447,20 @@ class StorageManager:
             cards.reverse()
             return cards
     
+    def get_cards_after_time(self, time: datetime, limit: int = 10) -> List[ActivityCard]:
+        """获取指定时间之后的卡片"""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM timeline_cards 
+                WHERE start_time >= ?
+                ORDER BY start_time ASC
+                LIMIT ?
+                """,
+                (time.isoformat(), limit)
+            )
+            return [self._row_to_card(row) for row in cursor.fetchall()]
+    
     def get_recent_cards(self, limit: int = 10) -> List[ActivityCard]:
         """获取最近的卡片（用作上下文）"""
         with self._get_connection() as conn:
@@ -433,7 +483,6 @@ class StorageManager:
             summary=row["summary"],
             start_time=datetime.fromisoformat(row["start_time"]) if row["start_time"] else None,
             app_sites=[AppSite.from_dict(a) for a in json.loads(row["app_sites_json"] or "[]")],
-            distractions=[Distraction.from_dict(d) for d in json.loads(row["distractions_json"] or "[]")],
             productivity_score=row["productivity_score"]
         )
         

@@ -192,9 +192,7 @@ class ScreenRecorder:
     
     def is_auto_paused(self) -> bool:
         """是否因闲置而自动暂停"""
-        if self._auto_pause_recorder:
-            return self._auto_pause_recorder.is_auto_paused()
-        return False
+        return self._auto_paused
     
     def get_idle_time(self) -> float:
         """获取闲置时间（秒）"""
@@ -440,6 +438,9 @@ class RecordingManager:
         self._auto_pause_recorder: Optional[SmartAutoPauseRecorder] = None
         self._enable_auto_pause = config.ENABLE_AUTO_PAUSE
         
+        # 录制管理器自己的自动暂停标志
+        self._auto_paused = False
+        
         # 分析调度器的原始启动状态（用于恢复）
         self._scheduler_was_running = False
     
@@ -513,6 +514,12 @@ class RecordingManager:
         
         # 5. 启动休息检测器（与录制器分离管理）
         if self._enable_auto_pause:
+            # 如果已有休息检测器实例，先停止它
+            if self._auto_pause_recorder and self._auto_pause_recorder._monitoring:
+                logger.info("检测到旧的休息检测器正在运行，先停止它")
+                self._auto_pause_recorder.stop()
+                self._auto_pause_recorder = None
+            
             self._auto_pause_recorder = SmartAutoPauseRecorder(
                 self.recorder,
                 stop_check_interval=config.STOP_CHECK_INTERVAL,
@@ -573,6 +580,10 @@ class RecordingManager:
                     logger.error(f"更新休息卡片 {latest_card.id} 失败")
         
         # 3. 启动视频录制，不启动休息检测器（因为它已经在运行）
+        # 清除自动暂停标志（从休息状态恢复录制）
+        self._auto_paused = False
+        logger.info("设置 _auto_paused = False（从休息状态恢复录制）")
+        
         start_time = self.recorder.start()
         logger.info(f"recorder.start()返回: {start_time.strftime('%H:%M:%S') if start_time else 'None'}")
         return start_time
@@ -598,6 +609,10 @@ class RecordingManager:
             return None
         
         logger.info("========== stop_recording_and_analyze: 开始 ==========")
+        
+        # 设置自动暂停标志（此方法在休息检测器调用停止录制时被调用）
+        self._auto_paused = True
+        logger.info("设置 _auto_paused = True（进入休息状态）")
         
         # 1. 停止录制（保存当前切片），获取停止时间
         # 注意：只停止视频录制，不停止休息检测器
@@ -650,24 +665,36 @@ class RecordingManager:
         """停止追踪（完全停止录制、休息检测和分析调度器）
         
         这是用户点击"停止追踪"按钮时调用的方法：
-        1. 停止视频录制
-        2. 停止休息检测器
-        3. 分析所有视频（等待分析完成）
-        4. 停止分析调度器（如果是由此方法启动的）
+        1. 停止休息检测器
+        2. 如果在录制中，停止录制并分析（等待所有分析完成）
+        3. 停止分析调度器（如果是由此方法启动的）
         
         返回:
             datetime: 录制停止时间
         """
-        logger.info("========== 停止追踪开始 ==========")
+        logger.info("========== RecordingManager.stop_tracking() 开始 ==========")
+        logger.info(f"  - is_recording: {self.is_recording}")
+        logger.info(f"  - is_auto_paused: {self.is_auto_paused()}")
+        logger.info(f"  - scheduler存在: {self.scheduler is not None}")
+        if self.scheduler:
+            logger.info(f"  - scheduler.is_running: {self.scheduler.is_running}")
         
         # 1. 停止休息检测器
         if self._auto_pause_recorder:
+            logger.info("停止休息检测器...")
             self._auto_pause_recorder.stop()
             self._auto_pause_recorder = None
             logger.info("休息检测器已停止")
+        else:
+            logger.info("休息检测器未启动，跳过")
         
-        # 2. 停止录制并分析（等待所有分析完成）
-        stop_time = self.stop_recording_and_analyze()
+        # 2. 只有在录制中时才停止录制并分析
+        # 休息状态下 is_recording = False，不需要再停止录制
+        stop_time = None
+        if self.is_recording:
+            stop_time = self.stop_recording_and_analyze()
+        else:
+            logger.info("录制已停止（休息状态），跳过停止录制和分析步骤")
         
         # 3. 停止分析调度器（强绑定：录制停止时停止分析，但要等分析完成）
         if self.scheduler and self.scheduler.is_running and not self._scheduler_was_running:
@@ -693,7 +720,7 @@ class RecordingManager:
     
     def is_auto_paused(self) -> bool:
         """是否因闲置而自动暂停"""
-        return self.recorder.is_auto_paused()
+        return self._auto_paused
     
     def get_idle_time(self) -> float:
         """获取闲置时间（秒）"""

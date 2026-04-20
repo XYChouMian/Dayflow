@@ -605,6 +605,10 @@ class SmartAutoPauseRecorder:
         """IDLE状态处理：进入等待检测状态"""
         current_time = time.time()
         
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出IDLE状态")
+            return
+        
         logger.info("进入等待检测状态")
         self._state = "WAIT_FOR_CHECK"
         self._state_start_time = current_time
@@ -612,6 +616,11 @@ class SmartAutoPauseRecorder:
     def _state_wait_for_check(self):
         """WAIT_FOR_CHECK状态处理：等待60秒后开始10秒检测"""
         current_time = time.time()
+        
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出WAIT_FOR_CHECK状态")
+            return
+        
         elapsed = current_time - self._state_start_time
         
         if elapsed >= 60:
@@ -625,6 +634,11 @@ class SmartAutoPauseRecorder:
     def _state_check_10s(self):
         """CHECK_10S状态处理：进行10秒检测"""
         current_time = time.time()
+        
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出CHECK_10S状态")
+            return
+        
         elapsed = current_time - self._state_start_time
         
         if elapsed <= 10:
@@ -644,6 +658,11 @@ class SmartAutoPauseRecorder:
     def _state_check_60s(self):
         """CHECK_60S状态处理：进行60秒二次检测"""
         current_time = time.time()
+        
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出CHECK_60S状态")
+            return
+        
         elapsed = current_time - self._state_start_time
         
         if self._check_activity_since(self._state_start_time):
@@ -676,6 +695,11 @@ class SmartAutoPauseRecorder:
     
     def _state_stopped(self):
         """STOPPED状态处理：录制停止状态，创建休息卡片并启动更新线程"""
+        
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，跳过STOPPED状态处理")
+            return
+        
         logger.info("创建休息卡片并启动更新线程")
         
         rest_card = self._create_rest_card()
@@ -692,6 +716,10 @@ class SmartAutoPauseRecorder:
         """REST_MONITORING状态处理：持续检测用户是否操作"""
         current_time = time.time()
         
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出REST_MONITORING状态")
+            return
+        
         if self._check_activity_since(self._state_start_time):
             logger.info("检测到用户操作，可能结束休息，等待30秒")
             self._state = "REST_WAIT_30"
@@ -702,6 +730,10 @@ class SmartAutoPauseRecorder:
     
     def _state_rest_wait_30(self):
         """REST_WAIT_30状态处理：等待30秒后开始90秒检测"""
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出REST_WAIT_30状态")
+            return
+        
         current_time = time.time()
         elapsed = current_time - self._state_start_time
         
@@ -709,13 +741,20 @@ class SmartAutoPauseRecorder:
             logger.info("30秒等待结束，开始90秒检测")
             self._state = "REST_DETECT_90"
             self._state_start_time = current_time
+            logger.info(f"状态转换: REST_WAIT_30 -> REST_DETECT_90 (elapsed={elapsed:.1f}秒)")
             return
-        
+            
+        logger.debug(f"REST_WAIT_30状态: 已等待{elapsed:.1f}秒，还需{30-elapsed:.1f}秒")
         self._stop_event.wait(1)
     
     def _state_rest_detect_90(self):
         """REST_DETECT_90状态处理：进行90秒检测，确认用户是否结束休息"""
         current_time = time.time()
+        
+        if self._stop_event.is_set():
+            logger.info("停止事件已设置，退出REST_DETECT_90状态")
+            return
+        
         elapsed = current_time - self._state_start_time
         
         if self._check_activity_since(self._state_start_time):
@@ -729,6 +768,9 @@ class SmartAutoPauseRecorder:
                     recording_start_time = self._on_resume_recording()
                 except Exception as e:
                     logger.error(f"恢复录制回调执行失败: {e}")
+            
+            # 停止休息卡片更新线程
+            self._stop_rest_card_update_thread()
             
             # 更新休息卡片结束时间（使用录制实际开始时间）
             self._update_rest_card_end_time(recording_start_time)
@@ -808,9 +850,10 @@ class SmartAutoPauseRecorder:
         
         if self._storage:
             try:
-                self._storage.save_card(rest_card)
-                self._current_rest_card_id = rest_card.id
-                logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                card_id = self._storage.save_card(rest_card)
+                rest_card.id = card_id
+                self._current_rest_card_id = card_id
+                logger.info(f"已创建休息卡片 ID={card_id}: {self._rest_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
                 return rest_card
             except Exception as e:
                 logger.error(f"保存休息卡片失败: {e}")
@@ -870,10 +913,13 @@ class SmartAutoPauseRecorder:
     def _update_rest_card_end_time_for_loop(self):
         """更新休息卡片的结束时间（后台更新循环调用，不清除卡片ID）"""
         if not self._current_rest_card_id or not self._rest_start_time:
+            logger.debug(f"跳过更新休息卡片: _current_rest_card_id={self._current_rest_card_id}, _rest_start_time={self._rest_start_time}")
             return
             
         current_time = datetime.now()
         rest_duration = (current_time - self._rest_start_time).total_seconds() / 60  # 分钟
+        
+        logger.info(f"开始更新休息卡片 ID={self._current_rest_card_id}, 当前休息时长: {rest_duration:.1f}分钟")
         
         if self._storage:
             try:
@@ -884,14 +930,20 @@ class SmartAutoPauseRecorder:
                 )
                 if updated:
                     logger.info(f"已更新休息卡片结束时间: {self._rest_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                else:
+                    logger.warning(f"更新休息卡片失败，返回False")
             except Exception as e:
                 logger.error(f"更新休息卡片失败: {e}")
     
     def _start_rest_card_update_thread(self):
         """启动休息卡片更新线程"""
+        logger.info(f"准备启动休息卡片更新线程: _rest_card_update_thread={self._rest_card_update_thread}, is_alive={self._rest_card_update_thread.is_alive() if self._rest_card_update_thread else None}")
+        
         if self._rest_card_update_thread and self._rest_card_update_thread.is_alive():
+            logger.info("休息卡片更新线程已在运行，不重复启动")
             return
             
+        logger.info(f"启动更新线程前的状态: _current_rest_card_id={self._current_rest_card_id}, _rest_start_time={self._rest_start_time}")
         self._rest_card_update_stop_event.clear()
         self._rest_card_update_thread = threading.Thread(target=self._rest_card_update_loop, daemon=True)
         self._rest_card_update_thread.start()
@@ -906,8 +958,10 @@ class SmartAutoPauseRecorder:
     
     def _rest_card_update_loop(self):
         """休息卡片更新循环"""
+        logger.info("休息卡片更新循环已启动")
         while not self._rest_card_update_stop_event.is_set():
             try:
+                logger.debug(f"休息卡片更新循环检查: _current_rest_card_id={self._current_rest_card_id}, _rest_start_time={self._rest_start_time}")
                 if self._current_rest_card_id and self._rest_start_time:
                     self._update_rest_card_end_time_for_loop()
                 self._rest_card_update_stop_event.wait(60)  # 每60秒更新一次
@@ -923,18 +977,6 @@ class SmartAutoPauseRecorder:
             self._auto_paused = True
         else:
             logger.info(f"录制器状态: 录制={self.recorder.is_recording}, 暂停={self.recorder.is_paused}, 不执行暂停")
-    
-    def _resume_recording(self):
-        """恢复录制"""
-        if self.recorder.is_paused:
-            logger.info("自动恢复录制")
-            self.recorder.resume()
-            self._auto_paused = False
-            
-            self._stop_rest_card_update_thread()
-            self._current_rest_card_id = None
-        else:
-            logger.info("录制器未暂停，不执行恢复")
     
     def _monitor_loop(self):
         """监测主循环"""
@@ -1019,6 +1061,13 @@ class SmartAutoPauseRecorder:
         
         logger.info("正在停止智能自动暂停录制器...")
         
+        # 立即设置停止事件，防止主监测线程继续执行状态机
+        self._stop_event.set()
+        
+        # 清空回调，防止主监测线程中的状态机继续调用
+        self._on_stop_recording = None
+        self._on_resume_recording = None
+        
         # 如果处于休息状态，创建休息卡片
         if self._rest_start_time:
             rest_end_time = datetime.now()
@@ -1087,10 +1136,15 @@ class SmartAutoPauseRecorder:
                     
                     if self._storage:
                         try:
-                            self._storage.save_card(rest_card)
-                            logger.info(f"已创建合并后的休息卡片: {merged_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({merged_duration:.1f}分钟)")
+                            card_id = self._storage.save_card(rest_card)
+                            rest_card.id = card_id
+                            self._current_rest_card_id = card_id
+                            logger.info(f"已创建合并后的休息卡片 ID={card_id}: {merged_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({merged_duration:.1f}分钟)")
                         except Exception as e:
                             logger.error(f"保存休息卡片失败: {e}")
+                
+                    # 更新休息开始时间为合并后的开始时间，用于更新循环
+                    self._rest_start_time = merged_start_time
                 else:
                     # 没有休息卡片，检查是否有其他卡片（视为休息时的误触）
                     non_rest_cards = [card for card in cards_in_last_2min if card.category != "休息"]
@@ -1134,8 +1188,10 @@ class SmartAutoPauseRecorder:
                     
                     if self._storage:
                         try:
-                            self._storage.save_card(rest_card)
-                            logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                            card_id = self._storage.save_card(rest_card)
+                            rest_card.id = card_id
+                            self._current_rest_card_id = card_id
+                            logger.info(f"已创建休息卡片 ID={card_id}: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
                         except Exception as e:
                             logger.error(f"保存休息卡片失败: {e}")
             else:
@@ -1152,12 +1208,18 @@ class SmartAutoPauseRecorder:
                 
                 if self._storage:
                     try:
-                        self._storage.save_card(rest_card)
-                        logger.info(f"已创建休息卡片: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
+                        card_id = self._storage.save_card(rest_card)
+                        rest_card.id = card_id
+                        self._current_rest_card_id = card_id
+                        logger.info(f"已创建休息卡片 ID={card_id}: {self._rest_start_time.strftime('%H:%M:%S')} - {rest_end_time.strftime('%H:%M:%S')} ({rest_duration:.1f}分钟)")
                     except Exception as e:
                         logger.error(f"保存休息卡片失败: {e}")
             
-            self._rest_start_time = None
+            # 用户点击"停止追踪"时，不启动休息卡片更新线程
+            # 休息卡片已经创建完成，不需要继续更新
+        
+        # 停止休息卡片更新线程（如果正在运行）
+        self._stop_rest_card_update_thread()
         
         # 停止监听器
         if self._mouse_listener:
@@ -1168,10 +1230,15 @@ class SmartAutoPauseRecorder:
             self._keyboard_listener.stop()
             self._keyboard_listener = None
         
-        # 停止监测线程
-        self._stop_event.set()
+        # 等待主监测线程完全停止（已在开始时设置了停止事件）
+        # 增加超时时间到5秒，确保线程有足够时间停止
         if self._monitor_thread and self._monitor_thread.is_alive():
-            self._monitor_thread.join(timeout=2)
+            logger.info("等待主监测线程停止...")
+            self._monitor_thread.join(timeout=5)
+            if self._monitor_thread.is_alive():
+                logger.warning("主监测线程未能在5秒内停止")
+            else:
+                logger.info("主监测线程已停止")
         
         self._monitoring = False
         logger.info("智能自动暂停录制器已停止")

@@ -3094,7 +3094,23 @@ class MainWindow(QMainWindow):
             self.recording_manager = RecordingManager(self.storage, scheduler=scheduler)
             self.recording_indicator.recording_manager = self.recording_manager
         
-        if self.recording_manager.is_recording:
+        logger.info(f"========== UI层：_toggle_recording被调用 ==========")
+        
+        # 一次性获取所有状态，避免多次检查之间的状态变化
+        is_recording = self.recording_manager.is_recording
+        is_auto_paused = self.recording_manager.is_auto_paused()
+        auto_pause_exists = self.recording_manager._auto_pause_recorder is not None
+        
+        logger.info(f"  - is_recording: {is_recording}")
+        logger.info(f"  - is_auto_paused: {is_auto_paused}")
+        logger.info(f"  - _auto_pause_recorder存在: {auto_pause_exists}")
+        
+        # 计算判断条件
+        should_stop = is_recording or is_auto_paused
+        logger.info(f"  - 判断条件 is_recording or is_auto_paused: {should_stop}")
+        
+        # 休息状态或录制状态都应该调用停止追踪
+        if should_stop:
             # 防止重复点击
             if self._stopping:
                 logger.debug("已在停止中，忽略重复点击")
@@ -3153,7 +3169,9 @@ class MainWindow(QMainWindow):
             self._start_analysis()
             
             # RecordingManager 会自动启动分析调度器（强绑定）
+            logger.info("========== UI层：准备调用 start_recording() ==========")
             self.recording_manager.start_recording()
+            logger.info("========== UI层：start_recording() 调用完成 ==========")
             self._update_record_button(True)
             self.recording_indicator.set_recording(True)
             self.tray_record_action.setText("⏹ 停止追踪")
@@ -3571,6 +3589,3 @@ class MainWindow(QMainWindow):
                 self._minimize_to_tray()
             else:
                 event.ignore()
-    
-
-

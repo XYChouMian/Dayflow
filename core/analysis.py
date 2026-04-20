@@ -421,9 +421,41 @@ class AnalysisScheduler:
                         card.app_sites = updated_app_sites
                         logger.debug(f"卡片 {idx + 1} 应用时长计算完成: {app_durations}")
             
+            # 处理 merge_with_previous 功能
+            merged_cards = []
+            cards_to_update_in_db = []  # 需要更新到数据库的卡片
+            
+            for idx, card in enumerate(cards):
+                if hasattr(card, '_merge_with_previous') and card._merge_with_previous:
+                    if idx == 0 and recent_cards:
+                        # 第一张新卡片合并到数据库中的旧卡片
+                        old_card = recent_cards[-1]
+                        old_card._next_card_start_time = card._next_card_start_time
+                        old_card.summary = f"{old_card.summary}\n{card.summary}"
+                        cards_to_update_in_db.append(old_card)
+                        logger.info(f"卡片 {idx + 1} 合并到数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已合并")
+                    elif idx > 0 and merged_cards:
+                        # 后续卡片合并到新批次中的上一张卡片
+                        previous_card = merged_cards[-1]
+                        previous_card._next_card_start_time = card._next_card_start_time
+                        previous_card.summary = f"{previous_card.summary}\n{card.summary}"
+                        logger.info(f"卡片 {idx + 1} 合并到上一张新卡片：结束时间延长到 {card._next_card_start_time}，摘要已合并")
+                    elif idx > 0 and recent_cards:
+                        # merged_cards为空但recent_cards有数据，合并到数据库中的旧卡片
+                        old_card = recent_cards[-1]
+                        old_card._next_card_start_time = card._next_card_start_time
+                        old_card.summary = f"{old_card.summary}\n{card.summary}"
+                        cards_to_update_in_db.append(old_card)
+                        logger.info(f"卡片 {idx + 1} 合并到数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已合并")
+                    else:
+                        logger.warning(f"卡片 {idx + 1} 标记为需要合并但没有可合并的上一张卡片，将作为新卡片保存")
+                        merged_cards.append(card)
+                else:
+                    merged_cards.append(card)
+            
             # 验证卡片时间连续性
             valid_cards = []
-            for idx, card in enumerate(cards):
+            for idx, card in enumerate(merged_cards):
                 if not card.start_time or not card._next_card_start_time:
                     logger.warning(f"卡片 {idx + 1} 时间信息不完整（start_time={card.start_time}, end_time={card._next_card_start_time}），跳过此卡片")
                     continue
@@ -432,9 +464,19 @@ class AnalysisScheduler:
                     continue
                 valid_cards.append(card)
             
-            logger.info(f"卡片时间验证通过：{len(valid_cards)}/{len(cards)} 张卡片")
+            logger.info(f"卡片时间验证通过：{len(valid_cards)}/{len(merged_cards)} 张卡片")
             
-            # 保存有效卡片
+            # 先更新数据库中需要合并的旧卡片
+            for card in cards_to_update_in_db:
+                if card.id:
+                    self.storage.update_card(
+                        card_id=card.id,
+                        summary=card.summary,
+                        end_time=card._next_card_start_time
+                    )
+                    logger.info(f"已更新数据库中的旧卡片（ID={card.id}）：结束时间={card._next_card_start_time}，摘要已合并")
+            
+            # 保存有效的新卡片
             for card in valid_cards:
                 self.storage.save_card(card, batch_id)
             
@@ -447,7 +489,8 @@ class AnalysisScheduler:
                 if chunk.id:
                     self.storage.update_chunk_status(chunk.id, ChunkStatus.COMPLETED)
             
-            logger.info(f"批次 {batch_id} 处理完成 - 生成 {len(valid_cards)} 张卡片")
+            merged_count = len(cards_to_update_in_db)
+            logger.info(f"批次 {batch_id} 处理完成 - 更新了 {merged_count} 张旧卡片，生成 {len(valid_cards)} 张新卡片")
             
             # 分析完成后删除视频切片文件（节省磁盘空间）
             if config.AUTO_DELETE_ANALYZED_CHUNKS:

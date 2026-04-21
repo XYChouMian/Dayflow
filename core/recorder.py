@@ -472,6 +472,10 @@ class RecordingManager:
         logger.info("========== RecordingManager: start_recording ==========")
         logger.info("开始录制...")
         
+        # 重置自动暂停标志（开始新录制时，不是自动暂停状态）
+        self._auto_paused = False
+        logger.info("重置 _auto_paused = False（开始新录制）")
+        
         # 1. 检查是否有未分析的视频
         pending_chunks = self.storage.get_pending_chunks()
         if pending_chunks:
@@ -702,6 +706,10 @@ class RecordingManager:
             logger.info("分析调度器已停止（录制-分析强绑定）")
         elif self.scheduler and self.scheduler.is_running:
             logger.info("分析调度器继续运行（录制-分析强绑定：恢复到原始状态）")
+        
+        # 4. 重置自动暂停标志（用户手动停止，不是自动暂停）
+        self._auto_paused = False
+        logger.info("重置 _auto_paused = False（用户手动停止，不是自动暂停）")
         
         logger.info(f"========== 停止追踪完成，停止时间：{stop_time.strftime('%H:%M:%S') if stop_time else 'None'} ==========")
         return stop_time

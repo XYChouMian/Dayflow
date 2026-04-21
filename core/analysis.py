@@ -304,12 +304,38 @@ class AnalysisScheduler:
                 return
             
             # 获取上下文（最近且与当前批次时间相邻的卡片）
-            # 只获取当前批次开始时间之前最近的一张卡片
+            # 重要：检查是否是 start_recording() 后的第一个批次
+            # 如果是第一个批次，不发送上下文卡片给AI
             if batch.start_time:
-                context_cards = self.storage.get_cards_before_time(
-                    batch.start_time, 
-                    limit=3
-                )
+                recording_start_time_str = self.storage.get_setting("recording_start_time", "")
+                if recording_start_time_str:
+                    try:
+                        recording_start_time = datetime.fromisoformat(recording_start_time_str)
+                        # 判断是否是第一个批次：批次开始时间与录制开始时间相差不超过5秒
+                        time_diff = abs((batch.start_time - recording_start_time).total_seconds())
+                        is_first_batch = time_diff <= 5
+                        
+                        if is_first_batch:
+                            logger.info(f"检测到这是 start_recording() 后的第一个批次（批次时间={batch.start_time}, 录制时间={recording_start_time}），不发送上下文卡片给AI")
+                            context_cards = []
+                        else:
+                            logger.info(f"这是后续批次，获取上下文卡片给AI")
+                            context_cards = self.storage.get_cards_before_time(
+                                batch.start_time, 
+                                limit=3
+                            )
+                    except Exception as e:
+                        logger.warning(f"解析录制开始时间失败: {e}，使用默认逻辑获取上下文卡片")
+                        context_cards = self.storage.get_cards_before_time(
+                            batch.start_time, 
+                            limit=3
+                        )
+                else:
+                    logger.info("没有录制开始时间记录，获取上下文卡片给AI")
+                    context_cards = self.storage.get_cards_before_time(
+                        batch.start_time, 
+                        limit=3
+                    )
             else:
                 context_cards = []
             
@@ -321,21 +347,24 @@ class AnalysisScheduler:
             )
             
             # 设置卡片开始时间和结束时间
-            # 第一张卡片的开始时间 = 录制开始时间（仅当数据库中没有任何卡片时）
+            # 新录制会话的第一张卡片开始时间 = 录制开始时间
+            # 连续录制的第一张卡片开始时间 = 上一张卡片的结束时间
             # 其他卡片的开始时间 = 上一张卡片的结束时间
             # 每张卡片的结束时间 = 批次开始时间 + AI返回的相对时间（最后一张卡片使用chunk结束时间）
             
-            # 检查是否是全局第一张卡片（数据库中没有任何卡片）
-            recent_cards = self.storage.get_recent_cards(limit=1)
-            is_first_card = len(recent_cards) == 0
+            # 获取最近的卡片（用于合并逻辑）
+            recent_cards = self.storage.get_recent_cards(limit=20)
             
-            if is_first_card:
-                # 第一张卡片：使用录制开始时间
+            # 检查是否是新录制会话（上下文卡片为空，说明间隔超过5秒或没有历史卡片）
+            is_new_session = len(context_cards) == 0
+            
+            if is_new_session:
+                # 新录制会话：第一张卡片使用录制开始时间
                 recording_start_time_str = self.storage.get_setting("recording_start_time", "")
                 if recording_start_time_str:
                     try:
                         current_card_start_time = datetime.fromisoformat(recording_start_time_str)
-                        logger.info(f"全局第一张卡片：使用录制开始时间 {current_card_start_time}")
+                        logger.info(f"新录制会话：第一张卡片使用录制开始时间 {current_card_start_time}")
                     except Exception as e:
                         logger.warning(f"解析录制开始时间失败: {e}，使用批次开始时间")
                         if batch.start_time:
@@ -346,17 +375,17 @@ class AnalysisScheduler:
                             return
                 elif batch.start_time:
                     current_card_start_time = batch.start_time
-                    logger.info(f"全局第一张卡片：使用批次开始时间 {current_card_start_time}")
+                    logger.info(f"新录制会话：第一张卡片使用批次开始时间 {current_card_start_time}")
                 else:
                     logger.error("无法确定第一张卡片的开始时间，跳过此批次")
                     self.storage.update_batch(batch_id, BatchStatus.COMPLETED, "[]")
                     return
             else:
-                # 非第一张卡片：使用前一张卡片的结束时间
-                last_card = recent_cards[-1]
-                if last_card.end_time:
-                    current_card_start_time = last_card.end_time
-                    logger.info(f"非第一张卡片：使用前一张卡片的结束时间 {current_card_start_time}")
+                # 连续录制会话：第一张卡片使用上下文最后一张卡片的结束时间
+                last_context_card = context_cards[-1]
+                if last_context_card.end_time:
+                    current_card_start_time = last_context_card.end_time
+                    logger.info(f"连续录制会话：第一张卡片使用上下文卡片的结束时间 {current_card_start_time}")
                 elif batch.start_time:
                     current_card_start_time = batch.start_time
                     logger.warning(f"前一张卡片无结束时间，使用批次开始时间 {current_card_start_time}")
@@ -431,22 +460,42 @@ class AnalysisScheduler:
                         # 第一张新卡片合并到数据库中的旧卡片
                         old_card = recent_cards[-1]
                         old_card._next_card_start_time = card._next_card_start_time
-                        old_card.summary = f"{old_card.summary}\n{card.summary}"
+                        
+                        # 检查是否需要更新或追加 summary
+                        if hasattr(card, '_updated_summary') and card._updated_summary:
+                            old_card.summary = card._updated_summary
+                            logger.info(f"卡片 {idx + 1} 更新数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已更新")
+                        else:
+                            old_card.summary = f"{old_card.summary}\n{card.summary}"
+                            logger.info(f"卡片 {idx + 1} 追加到数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已合并")
+                        
                         cards_to_update_in_db.append(old_card)
-                        logger.info(f"卡片 {idx + 1} 合并到数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已合并")
                     elif idx > 0 and merged_cards:
                         # 后续卡片合并到新批次中的上一张卡片
                         previous_card = merged_cards[-1]
                         previous_card._next_card_start_time = card._next_card_start_time
-                        previous_card.summary = f"{previous_card.summary}\n{card.summary}"
-                        logger.info(f"卡片 {idx + 1} 合并到上一张新卡片：结束时间延长到 {card._next_card_start_time}，摘要已合并")
+                        
+                        # 检查是否需要更新或追加 summary
+                        if hasattr(card, '_updated_summary') and card._updated_summary:
+                            previous_card.summary = card._updated_summary
+                            logger.info(f"卡片 {idx + 1} 更新上一张新卡片：结束时间延长到 {card._next_card_start_time}，摘要已更新")
+                        else:
+                            previous_card.summary = f"{previous_card.summary}\n{card.summary}"
+                            logger.info(f"卡片 {idx + 1} 追加到上一张新卡片：结束时间延长到 {card._next_card_start_time}，摘要已合并")
                     elif idx > 0 and recent_cards:
                         # merged_cards为空但recent_cards有数据，合并到数据库中的旧卡片
                         old_card = recent_cards[-1]
                         old_card._next_card_start_time = card._next_card_start_time
-                        old_card.summary = f"{old_card.summary}\n{card.summary}"
+                        
+                        # 检查是否需要更新或追加 summary
+                        if hasattr(card, '_updated_summary') and card._updated_summary:
+                            old_card.summary = card._updated_summary
+                            logger.info(f"卡片 {idx + 1} 更新数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已更新")
+                        else:
+                            old_card.summary = f"{old_card.summary}\n{card.summary}"
+                            logger.info(f"卡片 {idx + 1} 追加到数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已合并")
+                        
                         cards_to_update_in_db.append(old_card)
-                        logger.info(f"卡片 {idx + 1} 合并到数据库中的旧卡片（ID={old_card.id}）：结束时间延长到 {card._next_card_start_time}，摘要已合并")
                     else:
                         logger.warning(f"卡片 {idx + 1} 标记为需要合并但没有可合并的上一张卡片，将作为新卡片保存")
                         merged_cards.append(card)
@@ -493,7 +542,8 @@ class AnalysisScheduler:
             logger.info(f"批次 {batch_id} 处理完成 - 更新了 {merged_count} 张旧卡片，生成 {len(valid_cards)} 张新卡片")
             
             # 分析完成后删除视频切片文件（节省磁盘空间）
-            if config.AUTO_DELETE_ANALYZED_CHUNKS:
+            auto_delete_setting = self.storage.get_setting("auto_delete_analyzed_chunks", "true")
+            if auto_delete_setting.lower() == "true":
                 self._delete_chunk_files(chunks)
             
         except Exception as e:

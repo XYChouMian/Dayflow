@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QApplication, QSizePolicy, QSpacerItem, QFileDialog,
     QScrollArea, QProgressBar, QComboBox, QDialog,
-    QRadioButton
+    QRadioButton, QCheckBox
 )
 from PySide6.QtCore import QEvent
 from PySide6.QtGui import QDesktopServices
@@ -1042,11 +1042,17 @@ class SettingsPanel(QWidget):
         data_btn_row = QHBoxLayout()
         data_btn_row.setSpacing(10)
         
-        self.migrate_data_btn = QPushButton("📁 修改存储位置")
+        self.migrate_data_btn = QPushButton("💾 修改存储位置")
         self.migrate_data_btn.setCursor(Qt.PointingHandCursor)
         self.migrate_data_btn.setFixedHeight(38)
         self.migrate_data_btn.clicked.connect(self._migrate_data)
         data_btn_row.addWidget(self.migrate_data_btn)
+        
+        self.open_data_folder_btn = QPushButton("📂 打开数据目录")
+        self.open_data_folder_btn.setCursor(Qt.PointingHandCursor)
+        self.open_data_folder_btn.setFixedHeight(38)
+        self.open_data_folder_btn.clicked.connect(self._open_data_folder)
+        data_btn_row.addWidget(self.open_data_folder_btn)
         
         data_btn_row.addStretch()
         data_layout.addLayout(data_btn_row)
@@ -1089,12 +1095,6 @@ class SettingsPanel(QWidget):
         self.refresh_log_btn.hide()
         log_btn_row.addWidget(self.refresh_log_btn)
         
-        self.open_log_folder_btn = QPushButton("📂 打开日志目录")
-        self.open_log_folder_btn.setCursor(Qt.PointingHandCursor)
-        self.open_log_folder_btn.setFixedHeight(38)
-        self.open_log_folder_btn.clicked.connect(self._open_log_folder)
-        log_btn_row.addWidget(self.open_log_folder_btn)
-        
         log_btn_row.addStretch()
         log_layout.addLayout(log_btn_row)
         
@@ -1110,15 +1110,70 @@ class SettingsPanel(QWidget):
         data_log_row.addWidget(log_frame)
         layout.addLayout(data_log_row)
         
-        # === 关于 ===
-        about_frame, about_layout = self._create_card(layout)
-        self._create_title("ℹ️ 关于 Dayflow", about_layout)
+        # === 自动删除录屏 + 关于 Dayflow（一行两列）===
+        auto_delete_about_row = QHBoxLayout()
+        auto_delete_about_row.setSpacing(16)
         
-        about_text = QLabel("智能时间追踪与生产力分析工具\n支持灵感收集与事件总结")
+        # 自动删除录屏
+        auto_delete_frame = QFrame()
+        auto_delete_frame.setObjectName("settingsCard")
+        self._frames.append(auto_delete_frame)
+        auto_delete_layout = QVBoxLayout(auto_delete_frame)
+        auto_delete_layout.setContentsMargins(20, 16, 20, 16)
+        auto_delete_layout.setSpacing(10)
+        
+        auto_delete_title = QLabel("🗑️ 自动删除录屏")
+        auto_delete_title.setObjectName("cardTitle")
+        auto_delete_title.setMinimumHeight(24)
+        self._titles.append(auto_delete_title)
+        auto_delete_layout.addWidget(auto_delete_title)
+        
+        auto_delete_desc = QLabel("分析完成后自动删除视频切片，节省磁盘空间")
+        auto_delete_desc.setObjectName("cardDesc")
+        auto_delete_desc.setWordWrap(True)
+        self._descs.append(auto_delete_desc)
+        auto_delete_layout.addWidget(auto_delete_desc)
+        
+        # 自动删除开关
+        self.auto_delete_checkbox = QCheckBox("启用自动删除")
+        self.auto_delete_checkbox.setCursor(Qt.PointingHandCursor)
+        self.auto_delete_checkbox.clicked.connect(self._toggle_auto_delete_chunks)
+        auto_delete_layout.addWidget(self.auto_delete_checkbox)
+        
+        # 手动清理数据按钮
+        self.manual_cleanup_btn = QPushButton("🧹 手动清理数据")
+        self.manual_cleanup_btn.setCursor(Qt.PointingHandCursor)
+        self.manual_cleanup_btn.setFixedHeight(38)
+        self.manual_cleanup_btn.clicked.connect(self._manual_cleanup_chunks)
+        auto_delete_layout.addWidget(self.manual_cleanup_btn)
+        
+        # 初始化自动删除状态
+        self._init_auto_delete_status()
+        
+        auto_delete_about_row.addWidget(auto_delete_frame)
+        
+        # 关于 Dayflow
+        about_frame = QFrame()
+        about_frame.setObjectName("settingsCard")
+        self._frames.append(about_frame)
+        about_layout = QVBoxLayout(about_frame)
+        about_layout.setContentsMargins(20, 16, 20, 16)
+        about_layout.setSpacing(10)
+        
+        about_title = QLabel("ℹ️ 关于 Dayflow")
+        about_title.setObjectName("cardTitle")
+        about_title.setMinimumHeight(24)
+        self._titles.append(about_title)
+        about_layout.addWidget(about_title)
+        
+        about_text = QLabel("智能时间追踪与生产力分析工具\n支持灵感即刻记录与事件总结")
         about_text.setObjectName("cardDesc")
         about_text.setWordWrap(True)
         self._descs.append(about_text)
         about_layout.addWidget(about_text)
+        
+        auto_delete_about_row.addWidget(about_frame)
+        layout.addLayout(auto_delete_about_row)
         
         # 底部留白
         layout.addSpacing(20)
@@ -1247,6 +1302,34 @@ class SettingsPanel(QWidget):
                 color: {t.text_primary};
             }}
         """
+        
+        # 复选框样式
+        checkbox_style = f"""
+            QCheckBox {{
+                color: {t.text_primary};
+                font-size: 14px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border: 2px solid {t.border};
+                border-radius: 4px;
+                background-color: {t.bg_tertiary};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {t.accent};
+                border-color: {t.accent};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {t.accent};
+            }}
+            QCheckBox:hover {{
+                color: {t.text_primary};
+            }}
+        """
+        
         self.model_switch_btn.setStyleSheet(reset_btn_style)
         
         # 模型下拉框样式
@@ -1448,6 +1531,31 @@ class SettingsPanel(QWidget):
         self.dashboard_btn.setStyleSheet(data_btn_style)
         if hasattr(self, 'monitor_save_btn'):
             self.monitor_save_btn.setStyleSheet(data_btn_style)
+        if hasattr(self, 'migrate_data_btn'):
+            self.migrate_data_btn.setStyleSheet(data_btn_style)
+        if hasattr(self, 'open_data_folder_btn'):
+            self.open_data_folder_btn.setStyleSheet(data_btn_style)
+        
+        # 自动删除复选框样式
+        if hasattr(self, 'auto_delete_checkbox'):
+            self.auto_delete_checkbox.setStyleSheet(checkbox_style)
+        
+        # 手动清理按钮样式
+        if hasattr(self, 'manual_cleanup_btn'):
+            self.manual_cleanup_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {t.accent};
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    font-weight: 600;
+                    padding: 0 16px;
+                }}
+                QPushButton:hover {{
+                    background-color: {t.accent_hover};
+                }}
+            """)
         
         # 日志按钮样式
         log_btn_style = f"""
@@ -1466,7 +1574,6 @@ class SettingsPanel(QWidget):
         """
         self.view_log_btn.setStyleSheet(log_btn_style)
         self.refresh_log_btn.setStyleSheet(log_btn_style)
-        self.open_log_folder_btn.setStyleSheet(log_btn_style)
         
         # 日志文本框样式
         self.log_text.setStyleSheet(f"""
@@ -2150,16 +2257,19 @@ class SettingsPanel(QWidget):
         except Exception as e:
             self.log_text.setPlainText(f"❌ 读取日志失败: {e}")
     
-    def _open_log_folder(self):
-        """打开日志所在目录"""
+    def _open_data_folder(self):
+        """打开数据所在目录"""
         import subprocess
-        log_dir = config.APP_DATA_DIR
+        current_path, _ = self.data_migration_manager.get_current_data_path()
         
-        if log_dir.exists():
-            # Windows 打开文件夹
-            subprocess.run(['explorer', str(log_dir)])
+        if current_path.exists():
+            subprocess.run(['explorer', str(current_path)])
         else:
-            show_warning(self, "提示", f"日志目录不存在:\n{log_dir}")
+            msg_box = create_themed_message_box(self)
+            msg_box.setWindowTitle("提示")
+            msg_box.setText(f"数据目录不存在:\n{current_path}")
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.exec()
     
     def _update_data_path_display(self):
         """更新数据路径显示"""
@@ -2187,20 +2297,34 @@ class SettingsPanel(QWidget):
         
         # 检查是否正在追踪
         if self.main_window and self.main_window.recording_manager and self.main_window.recording_manager.is_recording:
-            QMessageBox.warning(
-                self,
-                "提示",
-                "当前正在追踪，请先停止追踪后再更改数据存储位置。"
-            )
+            msg_box = create_themed_message_box(self)
+            msg_box.setWindowTitle("提示")
+            msg_box.setText("当前正在追踪，请先停止追踪后再更改数据存储位置。")
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.exec()
             return
         
         # 选择目标路径
-        target_path = QFileDialog.getExistingDirectory(
-            self,
-            "选择数据存储位置",
-            str(self.data_migration_manager.default_data_dir),
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
+        dialog = QFileDialog(self)
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOptions(QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
+        
+        # 应用暗色主题
+        theme = get_theme()
+        dialog.setStyleSheet(get_theme_manager().get_global_stylesheet())
+        if theme.name == "dark":
+            palette = dialog.palette()
+            palette.setColor(QPalette.Window, QColor(theme.bg_primary))
+            palette.setColor(QPalette.WindowText, QColor(theme.text_primary))
+            dialog.setPalette(palette)
+            if sys.platform == 'win32':
+                from ui.themes import _set_dark_title_bar
+                _set_dark_title_bar(dialog, is_dark=True)
+        
+        if dialog.exec():
+            target_path = dialog.selectedFiles()[0]
+        else:
+            target_path = ""
         
         if not target_path:
             return
@@ -2210,7 +2334,11 @@ class SettingsPanel(QWidget):
         # 验证目标路径
         is_valid, error_msg = self.data_migration_manager.validate_target_path(target_path)
         if not is_valid:
-            QMessageBox.warning(self, "路径验证失败", error_msg)
+            msg_box = create_themed_message_box(self)
+            msg_box.setWindowTitle("路径验证失败")
+            msg_box.setText(error_msg)
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.exec()
             return
         
         # 确认迁移
@@ -2222,13 +2350,12 @@ class SettingsPanel(QWidget):
         confirm_msg += "4. 配置将在下次启动时生效\n\n"
         confirm_msg += "提示：建议先备份数据"
         
-        reply = QMessageBox.question(
-            self,
-            "确认数据迁移",
-            confirm_msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        msg_box = create_themed_message_box(self)
+        msg_box.setWindowTitle("确认数据迁移")
+        msg_box.setText(confirm_msg)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        reply = msg_box.exec()
         
         if reply != QMessageBox.Yes:
             return
@@ -2237,6 +2364,19 @@ class SettingsPanel(QWidget):
         progress = QProgressDialog("正在迁移数据，请稍候...", "取消", 0, 0, self)
         progress.setWindowTitle("数据迁移")
         progress.setWindowModality(Qt.WindowModal)
+        
+        # 应用暗色主题
+        theme = get_theme()
+        progress.setStyleSheet(get_theme_manager().get_global_stylesheet())
+        if theme.name == "dark":
+            palette = progress.palette()
+            palette.setColor(QPalette.Window, QColor(theme.bg_primary))
+            palette.setColor(QPalette.WindowText, QColor(theme.text_primary))
+            progress.setPalette(palette)
+            if sys.platform == 'win32':
+                from ui.themes import _set_dark_title_bar
+                _set_dark_title_bar(progress, is_dark=True)
+        
         progress.show()
         
         # 创建迁移线程
@@ -2285,13 +2425,12 @@ class SettingsPanel(QWidget):
                     "原数据将在下次启动时自动删除。\n\n"
                     "是否立即重新启动？"
                 )
-                reply = QMessageBox.question(
-                    self, 
-                    "成功", 
-                    success_msg,
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
+                msg_box = create_themed_message_box(self)
+                msg_box.setWindowTitle("成功")
+                msg_box.setText(success_msg)
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg_box.setDefaultButton(QMessageBox.Yes)
+                reply = msg_box.exec()
                 
                 self._update_data_path_display()
                 
@@ -2299,7 +2438,11 @@ class SettingsPanel(QWidget):
                     if self.main_window:
                         self.main_window._restart_application()
             else:
-                QMessageBox.critical(self, "失败", message)
+                msg_box = create_themed_message_box(self)
+                msg_box.setWindowTitle("失败")
+                msg_box.setText(message)
+                msg_box.setIcon(QMessageBox.Critical)
+                msg_box.exec()
         
         def on_progress_canceled():
             if hasattr(self, 'migration_thread') and self.migration_thread:
@@ -2308,6 +2451,127 @@ class SettingsPanel(QWidget):
         self.migration_thread.finished.connect(on_migration_finished)
         progress.canceled.connect(on_progress_canceled)
         self.migration_thread.start()
+    
+    def _init_auto_delete_status(self):
+        """初始化自动删除状态"""
+        try:
+            value = self.storage.get_setting("auto_delete_analyzed_chunks", "true")
+            auto_delete_enabled = value.lower() == "true"
+            self.auto_delete_checkbox.setChecked(auto_delete_enabled)
+            logger.info(f"自动删除状态: {auto_delete_enabled}")
+        except Exception as e:
+            logger.error(f"读取自动删除设置失败: {e}")
+            self.auto_delete_checkbox.setChecked(True)
+    
+    def _toggle_auto_delete_chunks(self):
+        """切换自动删除状态"""
+        try:
+            enabled = self.auto_delete_checkbox.isChecked()
+            value = "true" if enabled else "false"
+            self.storage.set_setting("auto_delete_analyzed_chunks", value)
+            
+            import config
+            config.AUTO_DELETE_ANALYZED_CHUNKS = enabled
+            logger.info(f"自动删除状态已更新: {enabled}")
+            
+            show_information(self, "设置已保存", f"自动删除录屏已{'启用' if enabled else '禁用'}")
+        except Exception as e:
+            logger.error(f"保存自动删除设置失败: {e}")
+            show_critical(self, "保存失败", f"保存设置时出错: {str(e)}")
+            self.auto_delete_checkbox.setChecked(not enabled)
+    
+    def _manual_cleanup_chunks(self):
+        """手动清理除今天外的所有录屏文件"""
+        import config
+        from datetime import datetime
+        
+        try:
+            chunks_dir = config.CHUNKS_DIR
+            
+            if not chunks_dir.exists():
+                show_warning(self, "提示", "录屏目录不存在")
+                return
+            
+            # 获取今天的日期
+            today = datetime.now().date()
+            
+            # 统计将要删除和保留的文件
+            files_to_delete = []
+            files_to_keep = []
+            
+            # 遍历chunks目录
+            for file_path in chunks_dir.iterdir():
+                if not file_path.is_file():
+                    continue
+                
+                # 只处理mp4和json文件
+                if file_path.suffix.lower() not in ['.mp4', '.json']:
+                    continue
+                
+                # 获取文件的修改时间
+                file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime).date()
+                
+                # 分类文件
+                if file_mtime < today:
+                    files_to_delete.append(file_path)
+                else:
+                    files_to_keep.append(file_path)
+            
+            # 如果没有需要清理的文件
+            if not files_to_delete:
+                show_information(self, "提示", "没有找到需要清理的文件")
+                return
+            
+            # 构建确认消息
+            confirm_msg = f"即将清理 {len(files_to_delete)} 个文件，今日的 {len(files_to_keep)} 个文件将保留\n\n"
+            confirm_msg += "将要删除的文件:\n"
+            
+            if len(files_to_delete) <= 10:
+                confirm_msg += "\n".join(f"  • {f.name}" for f in files_to_delete)
+            else:
+                confirm_msg += "\n".join(f"  • {f.name}" for f in files_to_delete[:-11:-1])
+                confirm_msg += f"\n  ... 还有 {len(files_to_delete) - 10} 个文件"
+            
+            confirm_msg += "\n\n是否确认清理？"
+            
+            # 弹出确认对话框
+            msg_box = create_themed_message_box(self)
+            msg_box.setWindowTitle("确认清理")
+            msg_box.setText(confirm_msg)
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.No)
+            
+            if msg_box.exec() != QMessageBox.Yes:
+                logger.info("用户取消了手动清理操作")
+                return
+            
+            # 执行删除
+            deleted_count = 0
+            failed_files = []
+            
+            for file_path in files_to_delete:
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                    logger.debug(f"已删除: {file_path.name}")
+                except Exception as e:
+                    logger.warning(f"删除文件失败 {file_path.name}: {e}")
+                    failed_files.append(file_path.name)
+            
+            # 显示清理结果
+            result_msg = f"清理完成！\n\n"
+            result_msg += f"已删除: {deleted_count} 个文件"
+            if failed_files:
+                result_msg += f"\n删除失败: {len(failed_files)} 个文件"
+                if len(failed_files) <= 5:
+                    result_msg += "\n" + "\n".join(f"  • {f}" for f in failed_files)
+            
+            show_information(self, "清理完成", result_msg)
+            logger.info(f"手动清理完成: 删除 {deleted_count} 个文件，失败 {len(failed_files)} 个")
+            
+        except Exception as e:
+            logger.error(f"手动清理失败: {e}")
+            show_critical(self, "清理失败", f"清理过程中出错: {str(e)}")
     
     def _init_autostart_status(self):
         """初始化自启动状态"""
@@ -2736,7 +3000,7 @@ class MainWindow(QMainWindow):
         # 分析控制按钮
         self.record_btn = QPushButton("开始追踪")
         self.record_btn.setCursor(Qt.PointingHandCursor)
-        self.record_btn.setFixedHeight(44)
+        self.record_btn.setFixedHeight(60)
         self.record_btn.clicked.connect(self._toggle_recording)
         sidebar_layout.addWidget(self.record_btn)
         

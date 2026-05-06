@@ -158,6 +158,6 @@
 ## 🙏 致谢
 
 - 感谢智谱 AI（GLM 模型）提供强大的 AI 分析能力
-- 灵感来源于 [Dayflow (macOS)](https://github.com/JerryZLiu/Dayflow) 开源项目
-- 感谢 [SeiShonagon520](https://github.com/SeiShonagon520) 提供的原始 Windows 版本项目基础
+- 本项目基于 [SeiShonagon520](https://github.com/SeiShonagon520) 的 Windows 版本项目进行开发和改进，原始灵感来源于 [Dayflow (macOS)](https://github.com/JerryZLiu/Dayflow) 开源项目
+- 感谢原作者和社区贡献者的创意与开源精神
 - 感谢所有贡献者和用户的支持与反馈

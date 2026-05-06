@@ -204,6 +204,8 @@ pip install pyinstaller
 python build.py
 
 # 或直接双击 build.bat
+# build.bat 内部命令：
+# python -m PyInstaller Dayflow.spec --clean --noconfirm
 ```
 
 打包完成后，`dist/Dayflow/` 目录可以直接复制给其他人使用。
@@ -477,9 +479,9 @@ Dayflow/
 
 ## 💡 灵感来源
 
-本项目灵感源于 [Dayflow (macOS)](https://github.com/JerryZLiu/Dayflow) 开源项目。由于原项目仅支持 macOS，因此我基于相同理念开发了这个 Windows 版本，让更多用户能够体验 AI 驱动的智能时间追踪。
+本项目基于 [SeiShonagon520](https://github.com/SeiShonagon520) 的 Windows 版本项目进行开发和改进，原始灵感来源于 [Dayflow (macOS)](https://github.com/JerryZLiu/Dayflow) 开源项目。我在原 Windows 版本的基础上进行了大量功能扩展和架构重构，致力于让更多 Windows 用户能够体验 AI 驱动的智能时间追踪工具。
 
-感谢原作者的创意和开源精神！🙏
+感谢原作者和社区贡献者的创意与开源精神！🙏
 
 ---
 

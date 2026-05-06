@@ -72,6 +72,7 @@ test_*.mp4
 test*
 debug*
 demo*
+!tests/
 
 # PyInstaller (keep .spec file for reproducible builds)
 # *.spec

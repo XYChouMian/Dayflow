@@ -1,6 +1,6 @@
-# Dayflow v2026.4.22 发布说明
+# Dayflow v2026.5.6 发布说明
 
-> 🎉 Dayflow for Windows v2026.4.22 现已发布！
+> 🎉 Dayflow for Windows v2026.5.6 现已发布！
 
 ---
 
@@ -8,7 +8,7 @@
 
 | 文件 | 描述 |
 |------|------|
-| [Dayflow-2026.4.22-windows.zip](https://github.com/XYChouMian/Dayflow/releases/download/release-2026.4.22/Dayflow_internal.zip) | Windows 预编译版本（推荐） |
+| [Dayflow-2026.5.6-windows.zip](https://github.com/XYChouMian/Dayflow/releases/download/release-2026.5.6/Dayflow_internal.zip) | Windows 预编译版本（推荐） |
 
 > ⚠️ **重要**：解压后请保留同目录下的 `_internal` 文件夹，否则程序无法正常运行！
 
@@ -20,7 +20,7 @@
 
 1. **下载 zip 包**
    ```bash
-   点击上方下载链接获取 Dayflow-2026.4.22-windows.zip
+   点击上方下载链接获取 Dayflow-2026.5.6-windows.zip
    ```
 
 2. **解压到任意目录**
@@ -96,7 +96,7 @@
 
 ## 📋 版本历史
 
-### v2026.4.22 (2026-04-22)
+### v2026.5.6 (2026-05-06)
 - 🎉 首次正式发布
 - ✅ 完整的智能时间追踪功能
 - ✅ GLM 系列模型适配
